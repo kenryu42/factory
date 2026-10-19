@@ -173,3 +173,21 @@ export type BenchResult = {
   at: string
   transcript: 'stored' | 'withheld'
 }
+
+export type ImprovementStatus = 'proposed' | 'no_change' | 'agent_failed' | 'blocked_secret' | 'blocked_scope'
+
+// One run of the improve agent over the evidence in factory-runs. Stored at improvements/<id>/improvement.json,
+// next to findings.md (the evidence it read) and, when it may be stored, patch.diff, summary.md and improve.jsonl.
+export type Improvement = {
+  id: string
+  at: string
+  // The factory commit the agent read and the patch applies to.
+  factorySha: string
+  basis: { runs: number; scores: number; failingScores: number; benches: string[] }
+  harness: HarnessName
+  model: string
+  costUsd: number | null
+  wallTimeS: number
+  changedFiles: string[]
+  status: ImprovementStatus
+}

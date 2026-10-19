@@ -92,6 +92,7 @@ test('the page holds the run, and transcript text cannot close its data script',
     steps: { 'run-42': { 'implement-0': [{ kind: 'message', text: 'look </script><img src=x>' }] } },
     scores: [],
     bench: [],
+    improvements: [],
   })
   assert.ok(html.includes('run-42'))
   assert.equal(html.split('</script>').length - 1, 2, 'one close for the data script, one for the page script')
@@ -109,6 +110,7 @@ test('long tool output is cut in the page data', () => {
     steps: { r: { 'implement-0': [{ kind: 'tool_result', output: 'x'.repeat(10_000), isError: false }] } },
     scores: [],
     bench: [],
+    improvements: [],
   })
   const data = JSON.parse(html.match(/id="report-data">([^<]*)</)![1])
   const out: string = data.steps.r['implement-0'][0].output
@@ -136,6 +138,7 @@ test('a revised run carries every stage, its verdicts, and a transcript per stag
     },
     scores: [],
     bench: [],
+    improvements: [],
   })
   const data = JSON.parse(html.match(/id="report-data">([^<]*)</)![1])
   const run = data.rows[0]
@@ -257,6 +260,7 @@ test('the page carries each run score and the bench summary', () => {
     steps: {},
     scores: [score('run-1', 'correctness', false), score('run-1', 'scope', true)],
     bench: [cell({})],
+    improvements: [],
   })
   const data = JSON.parse(html.match(/id="report-data">([^<]*)</)![1])
   assert.deepEqual(data.scores.map((s: Score) => [s.runId, s.scorer, s.pass]), [['run-1', 'correctness', false], ['run-1', 'scope', true]])

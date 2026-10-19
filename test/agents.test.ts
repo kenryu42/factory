@@ -2,12 +2,11 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loadAgent, parseAgent, parseVerdict } from '../src/agents.ts'
-import type { AgentName } from '../src/types.ts'
 
 const agentsDir = fileURLToPath(new URL('../agents', import.meta.url))
 
 test('every shipped agent loads with a model for every harness', () => {
-  for (const name of ['spec', 'implement', 'review'] satisfies AgentName[]) {
+  for (const name of ['spec', 'implement', 'review', 'improve']) {
     const agent = loadAgent(agentsDir, name)
     assert.equal(agent.defaultHarness, 'claude-code', name)
     assert.deepEqual(Object.keys(agent.models).sort(), ['claude-code', 'pi'], name)

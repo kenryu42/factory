@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { CORRECTNESS } from './score.ts'
-import { HARNESS_NAMES, type BenchResult, type HarnessName, type Outcome, type ReportRow, type RunStatus, type Score, type Step, type Verdict } from './types.ts'
+import { HARNESS_NAMES, type BenchResult, type HarnessName, type Improvement, type Outcome, type ReportRow, type RunRecord, type RunStatus, type Score, type Step, type Verdict } from './types.ts'
 
 const MAX_INPUT = 2000
 const MAX_OUTPUT = 4000
@@ -79,7 +79,7 @@ function clipStep(s: Step): Step {
 export type Tally = { pass: number; fail: number; unknown: number }
 
 // Scorer -> implement harness -> how that harness's runs scored. Correctness comes first.
-export function scoreSummary(rows: ReportRow[], scores: Score[]): { scorer: string; byHarness: Record<HarnessName, Tally> }[] {
+export function scoreSummary(rows: Pick<RunRecord, 'id' | 'harness'>[], scores: Score[]): { scorer: string; byHarness: Record<HarnessName, Tally> }[] {
   const harnessOf = new Map(rows.map((r) => [r.id, r.harness]))
   const names = [...new Set(scores.map((s) => s.scorer))].sort((a, b) => Number(b === CORRECTNESS) - Number(a === CORRECTNESS) || a.localeCompare(b))
   return names.map((scorer) => {
@@ -96,7 +96,7 @@ export function scoreSummary(rows: ReportRow[], scores: Score[]): { scorer: stri
 // The final review verdict against correctness, over runs that have both. approve.wrong counts defects the review missed.
 export type Calibration = Record<Verdict, { correct: number; wrong: number }>
 
-export function calibration(rows: ReportRow[], scores: Score[]): Calibration {
+export function calibration(rows: Pick<RunRecord, 'id' | 'verdict'>[], scores: Score[]): Calibration {
   const correct = new Map(scores.filter((s) => s.scorer === CORRECTNESS && s.pass !== null).map((s) => [s.runId, s.pass!]))
   const cal: Calibration = { approve: { correct: 0, wrong: 0 }, request_changes: { correct: 0, wrong: 0 } }
   for (const r of rows) {
@@ -157,6 +157,8 @@ export type ReportModel = {
   steps: Record<string, Record<string, Step[] | null>>
   scores: Score[]
   bench: BenchResult[]
+  // headline is the first line of the agent's summary, null when none was stored.
+  improvements: (Improvement & { headline: string | null })[]
 }
 
 export function renderReport(model: ReportModel): string {
@@ -171,6 +173,7 @@ export function renderReport(model: ReportModel): string {
     scoreSummary: scoreSummary(model.rows, model.scores),
     calibration: calibration(model.rows, model.scores),
     bench: benchSummary(model.bench),
+    improvements: model.improvements.toSorted((a, b) => b.at.localeCompare(a.at)),
   }
   // `<` escaped so no string in the data, such as `</script>` in a transcript, can end the script element.
   const json = JSON.stringify(data).replace(/</g, '\\u003c')

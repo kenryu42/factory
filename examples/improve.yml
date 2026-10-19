@@ -1,0 +1,21 @@
+# Copy to .github/workflows/improve.yml in a target repo to ask the improve agent for a change to the factory's prompts.
+# It reads everything in <owner>/factory-runs and saves its proposal there under improvements/<id>/.
+name: factory improve
+
+on:
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: The improve agent's harness (claude-code or pi; empty for the default)
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  improve:
+    uses: kenryu42/factory/.github/workflows/improve.yml@main
+    with:
+      harness: ${{ inputs.harness }}
+      # runner: '["self-hosted", "factory"]'
+    secrets: inherit

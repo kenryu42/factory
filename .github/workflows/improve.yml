@@ -1,0 +1,81 @@
+# Called from a target repo's improve.yml (see examples/improve.yml). The improve agent reads what the scorers, reviews
+# and benchmarks in <owner>/factory-runs found, and edits agents/*.md and scorers/*.md in a checkout of this repo. The
+# change lands in factory-runs as improvements/<id>/patch.diff; `node src/cli.ts propose` turns it into a pull request.
+# The secret split matches run.yml: the steps that talk to GitHub get FACTORY_GH_TOKEN (plus the model credentials,
+# only to scrub them from what they push), and the step that runs the agent gets model credentials only.
+name: factory improve
+
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: The improve agent's harness, claude-code or pi. Empty means the default in agents/improve.md
+        type: string
+        default: ''
+      runner:
+        description: JSON value for runs-on, such as '"ubuntu-latest"' or '["self-hosted", "factory"]'
+        type: string
+        default: '"ubuntu-latest"'
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: { required: false }
+      ANTHROPIC_API_KEY: { required: false }
+      DEEPSEEK_API_KEY: { required: false }
+      FACTORY_GH_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  improve:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    concurrency:
+      group: factory-improve-${{ github.repository_owner }}
+    env:
+      FACTORY_WORK_DIR: ${{ github.workspace }}/work
+    steps:
+      - uses: actions/checkout@v7
+        id: factory
+        with:
+          repository: kenryu42/factory
+          ref: main
+          path: factory
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # The tree the agent edits: the same commit as the code that runs, in its own checkout.
+      - uses: actions/checkout@v7
+        with:
+          repository: kenryu42/factory
+          ref: ${{ steps.factory.outputs.commit }}
+          path: work
+          persist-credentials: false
+
+      - uses: ./factory/.github/actions/tools
+
+      - run: echo "FACTORY_RUN_DIR=$RUNNER_TEMP/factory-improve" >> "$GITHUB_ENV"
+
+      - name: Prepare
+        run: node factory/src/cli.ts improve-prepare
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+
+      - name: Improve
+        run: node factory/src/cli.ts improve-run
+        env:
+          IMPROVE_HARNESS: ${{ inputs.harness }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: always()
+        name: Save
+        run: node factory/src/cli.ts improve-save
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

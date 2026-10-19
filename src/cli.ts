@@ -13,9 +13,16 @@
 // .github/workflows/bench.yml replays bench tasks across harness:model configs:
 //   bench-run       run the implement agent on each task x config and grade the tree   (model keys only)
 //   bench-save      push the results and scrubbed transcripts   (FACTORY_GH_TOKEN)
+// .github/workflows/improve.yml asks the improve agent for a change to the factory's own prompts:
+//   improve-prepare write findings.md from factory-runs and keep a copy of the untouched factory checkout   (FACTORY_GH_TOKEN)
+//   improve-run     run the improve agent on the factory checkout with findings.md   (model keys only)
+//   improve-save    diff the checkout, gate its scope, and push the improvement   (FACTORY_GH_TOKEN)
 // Local:
 //   db              build runs.sqlite from a local factory-runs checkout
 //   report          build report.html from a local factory-runs checkout   (your gh login)
+//   findings        print the findings.md the improve agent would read from a local factory-runs checkout
+//   propose         open a pull request on the factory checkout you run it in from a proposed improvement   (your gh login)
+//   models          check that every pi model in agents/ and scorers/ is in the image's catalog   (CI, no keys)
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process'
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -25,11 +32,13 @@ import { cellName, parseConfigs, parseTask } from './bench.ts'
 import { loadAgent, loadAgents, parseScore, parseVerdict } from './agents.ts'
 import { approvedSpec, decide, splitBenchMarker, SPEC_MARKER, type IssueComment } from './guard.ts'
 import { credential, harnesses } from './harnesses.ts'
+import { basis, findingsMarkdown, headline, patchProblems, type Evidence } from './improve.ts'
 import { prOutcome, renderReport, type PrView, type ReportModel } from './report.ts'
 import { CORRECTNESS, gradeTree, pendingScores, transcriptMarkdown } from './score.ts'
 import { scrub } from './scrub.ts'
-import type {
-  AgentName, BenchResult, Billing, HarnessName, Issue, Plan, PublishResult, ReportRow, RunRecord, RunStatus, Score, StageResult, StageRun, Transcript,
+import {
+  isHarnessName, type AgentName, type BenchResult, type Billing, type HarnessName, type Improvement, type ImprovementStatus, type Issue, type Plan,
+  type PublishResult, type ReportRow, type RunRecord, type RunStatus, type Score, type StageResult, type StageRun, type Transcript,
 } from './types.ts'
 
 const SECRET_ENV = [...Object.values(harnesses).flatMap((h) => h.credentials.map((c) => c.env)), 'FACTORY_GH_TOKEN']
@@ -475,12 +484,13 @@ function scoreJudge() {
         if (!def) throw new Error(`no scorers/${job.scorer}.md`)
         const harness = def.defaultHarness
         const run = runAgent(name, { harness, model: def.models[harness], prompt: def.prompt, mounts: [`${join(dir, 'evidence')}:/work:ro`], log: join(dir, 'judge') })
-        const pass = run.ok ? parseScore(run.transcript.finalText) : null
+        // A judge that crashed says nothing about the run, so the job stays pending instead of saving an unknown.
+        if (!run.ok) throw new Error('the judge did not finish')
         const text = run.transcript.finalText.trim()
         score = {
           ...base,
-          pass,
-          reason: !run.ok ? 'The judge did not finish.' : text.length > 2000 ? `${text.slice(0, 2000)}…` : text || 'The judge gave no reason.',
+          pass: parseScore(text),
+          reason: text.length > 2000 ? `${text.slice(0, 2000)}…` : text || 'The judge gave no reason.',
           at: new Date().toISOString(),
           judge: { harness, model: run.transcript.model ?? def.models[harness], billing: run.billing, costUsd: run.transcript.usage.costUsd, wallTimeS: run.wallTimeS },
         }
@@ -590,6 +600,152 @@ function benchSave() {
   console.log(`bench-save: pushed ${saved} results`)
 }
 
+// What improve-prepare leaves for the steps after it. No file means there was nothing to improve.
+type ImproveState = { id: string; factorySha: string; basis: Improvement['basis'] }
+type ImproveRun = { harness: HarnessName; model: string; ok: boolean; finalText: string; costUsd: number | null; wallTimeS: number; at: string }
+const improveFile = (name: string) => join(runFile('improve'), name)
+
+function readEvidence(runsRepoDir: string): Evidence {
+  const records = readRecords(runsRepoDir)
+  const reviews: Evidence['reviews'] = {}
+  for (const r of records) {
+    const s = r.stages.findLast((x) => x.agent === 'review')
+    const file = s && join(runsRepoDir, 'transcripts', r.id, `${stageName(s.agent, s.round)}.jsonl`)
+    if (s?.transcript === 'stored' && file && existsSync(file)) reviews[r.id] = harnesses[s.harness].parse(readFileSync(file, 'utf8')).finalText
+  }
+  return { records, scores: readNested<Score>(runsRepoDir, 'scores'), bench: readNested<BenchResult>(runsRepoDir, 'bench'), reviews }
+}
+
+function improvePrepare() {
+  const work = resolve(env('FACTORY_WORK_DIR'))
+  const runsDir = cloneRunsRepo(env('FACTORY_GH_TOKEN'), env('GITHUB_REPOSITORY_OWNER'))
+  const evidence = readEvidence(runsDir)
+  // The clone holds FACTORY_GH_TOKEN in its remote URL, and the agent step must not see it.
+  rmSync(runsDir, { recursive: true, force: true })
+  const b = basis(evidence)
+  if (!b.failingScores && !evidence.bench.some((c) => c.pass === false)) {
+    return console.log(`improve-prepare: ${b.runs} runs, ${b.scores} scores, no failing score or bench cell, so nothing to improve`)
+  }
+  rmSync(runFile('improve'), { recursive: true, force: true })
+  mkdirSync(improveFile('input'), { recursive: true })
+  writeFileSync(improveFile('input/findings.md'), findingsMarkdown(evidence))
+  // The checkout before the agent touches it, .git included. improve-save diffs against this copy, so no git
+  // command ever runs in a .git the agent could have changed.
+  sh('rsync', ['-a', `${work}/`, `${improveFile('base')}/`])
+  const state: ImproveState = { id: runId(), factorySha: sh('git', ['-C', work, 'rev-parse', 'HEAD']), basis: b }
+  writeJsonFile(improveFile('state.json'), state)
+  console.log(`improve-prepare: ${state.id} on ${state.factorySha.slice(0, 7)}: ${b.runs} runs, ${b.scores} scores (${b.failingScores} failing), benches ${b.benches.join(', ') || 'none'}`)
+}
+
+function improveRun() {
+  if (!existsSync(improveFile('state.json'))) return console.log('improve-run: nothing to improve')
+  // The definition comes from the factory code running this step, never from the checkout the agent edits.
+  const def = loadAgent(agentsDir, 'improve')
+  const harness = process.env.IMPROVE_HARNESS || def.defaultHarness
+  if (!isHarnessName(harness)) throw new Error(`IMPROVE_HARNESS must be one of claude-code, pi, got "${harness}"`)
+  const model = def.models[harness]
+  const work = resolve(env('FACTORY_WORK_DIR'))
+  const run = runAgent('improve', { harness, model, prompt: def.prompt, mounts: [`${work}:/work`, `${improveFile('input')}:/input:ro`], log: improveFile('improve') })
+  writeJsonFile(improveFile('run.json'), {
+    harness, model: run.transcript.model ?? model, ok: run.ok, finalText: run.transcript.finalText,
+    costUsd: run.transcript.usage.costUsd, wallTimeS: run.wallTimeS, at: run.startedAt,
+  } satisfies ImproveRun)
+}
+
+function improveSave() {
+  if (!existsSync(improveFile('state.json'))) return console.log('improve-save: nothing to save')
+  const state = readJsonFile<ImproveState>(improveFile('state.json'))
+  const run = existsSync(improveFile('run.json')) ? readJsonFile<ImproveRun>(improveFile('run.json')) : null
+  const def = loadAgent(agentsDir, 'improve')
+  const files: Record<string, string> = { 'findings.md': readFileSync(improveFile('input/findings.md'), 'utf8') }
+  let status: ImprovementStatus = 'agent_failed'
+  let changedFiles: string[] = []
+  if (run?.ok) {
+    const base = improveFile('base')
+    sh('rsync', ['-a', '--checksum', '--delete', '--exclude=.git', `${resolve(env('FACTORY_WORK_DIR'))}/`, `${base}/`])
+    const git = (...args: string[]) => sh('git', ['-C', base, '-c', 'core.hooksPath=/dev/null', ...args], { maxBuffer: 64 * 1024 * 1024 })
+    git('add', '-A')
+    const patch = git('diff', '--cached', '--no-renames', '--no-color')
+    changedFiles = git('diff', '--cached', '--no-renames', '--name-only').split('\n').filter(Boolean).map((f) => scrub(f, secrets()))
+    const problems = patch ? patchProblems(patch) : []
+    if (!patch) status = 'no_change'
+    else if (problems.length) {
+      status = 'blocked_scope'
+      console.log(`improve-save: blocked: ${problems.join('; ')}`)
+    } else if (scrub(patch, secrets()) !== patch || hasLeak(`${patch}\n${scrub(run.finalText, secrets())}`)) status = 'blocked_secret'
+    else {
+      status = 'proposed'
+      files['patch.diff'] = `${patch}\n`
+    }
+  }
+  // A blocked proposal keeps only its record and the evidence.
+  if (status !== 'blocked_scope' && status !== 'blocked_secret') {
+    const summary = scrub(run?.finalText.trim() ?? '', secrets())
+    if (summary && !hasLeak(summary)) files['summary.md'] = `${summary}\n`
+    const transcript = existsSync(improveFile('improve.jsonl')) ? storable(readFileSync(improveFile('improve.jsonl'), 'utf8')) : null
+    if (transcript) files['improve.jsonl'] = transcript
+  }
+  const harness = run?.harness ?? def.defaultHarness
+  const improvement: Improvement = {
+    id: state.id,
+    at: run?.at ?? new Date().toISOString(),
+    factorySha: state.factorySha,
+    basis: state.basis,
+    harness,
+    model: run?.model ?? def.models[harness],
+    costUsd: run?.costUsd ?? null,
+    wallTimeS: run?.wallTimeS ?? 0,
+    changedFiles,
+    status,
+  }
+  const dir = cloneRunsRepo(env('FACTORY_GH_TOKEN'), env('GITHUB_REPOSITORY_OWNER'))
+  const target = join(dir, 'improvements', state.id)
+  mkdirSync(target, { recursive: true })
+  writeJsonFile(join(target, 'improvement.json'), improvement)
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(target, name), text)
+  if (!pushRunsRepo(dir, `improvement ${state.id}: ${status}`)) return console.log(`improve-save: ${state.id} already saved`)
+  console.log(`improve-save: ${state.id} ${status} ${changedFiles.join(', ')} cost=${improvement.costUsd ?? 'n/a'}`)
+}
+
+// Run by the owner in their factory checkout, with their own gh login: the factory's token cannot write to this repo.
+function propose(runsRepoDir: string, id: string) {
+  const refuse = (why: string) => {
+    console.error(`propose: refusing: ${why}`)
+    process.exit(1)
+  }
+  const dir = resolve(runsRepoDir, 'improvements', id)
+  if (!existsSync(join(dir, 'improvement.json'))) return refuse(`no improvement ${id} in ${runsRepoDir}`)
+  const improvement = readJsonFile<Improvement>(join(dir, 'improvement.json'))
+  if (improvement.status !== 'proposed') return refuse(`improvement ${id} is ${improvement.status}, so it has no patch to propose`)
+  const patchFile = join(dir, 'patch.diff')
+  const problems = patchProblems(readFileSync(patchFile, 'utf8'))
+  if (problems.length) return refuse(`the patch changes more than the agent prompts in agents/: ${problems.join('; ')}`)
+  const summary = readFileSync(join(dir, 'summary.md'), 'utf8').trim()
+  const repo = sh('git', ['rev-parse', '--show-toplevel'])
+  const git = (...args: string[]) => sh('git', ['-C', repo, ...args])
+  if (git('status', '--porcelain')) return refuse('the working tree has uncommitted changes; commit or stash them first')
+
+  const branch = `improve/${id}`
+  git('fetch', '--quiet', 'origin')
+  git('switch', '--quiet', '-c', branch, improvement.factorySha)
+  try {
+    git('apply', '--index', patchFile)
+    const scopes = [...new Set(git('diff', '--cached', '--name-only').split('\n').map((f) => f.split('/')[0]))].sort()
+    const subject = `feat(${scopes.join(',')}): ${headline(summary)}`
+    // The summary's first line is the subject, so the body is the rest.
+    const rest = summary.replace(/^.*\n?/, '').trim()
+    git('commit', '--quiet', '-m', subject, ...(rest ? ['-m', rest] : []))
+    git('push', '--quiet', '-u', 'origin', branch)
+    const body = join(mkdtempSync(join(tmpdir(), 'propose-')), 'body.md')
+    writeFileSync(body, `${rest}\n\n---\nProposed by the factory improve agent: improvement \`${id}\` in factory-runs holds the evidence it read and its transcript. ` +
+      `Benchmark this branch with \`factory_ref: ${branch}\` before merging.\n`)
+    const url = sh('gh', ['pr', 'create', '--head', branch, '--title', subject, '--body-file', body], { cwd: repo })
+    console.log(`propose: ${branch}: ${url}`)
+  } finally {
+    git('checkout', '--quiet', '-')
+  }
+}
+
 function readRecords(runsRepoDir: string): RunRecord[] {
   return readdirSync(join(runsRepoDir, 'runs'))
     .filter((f) => f.endsWith('.json'))
@@ -597,7 +753,7 @@ function readRecords(runsRepoDir: string): RunRecord[] {
 }
 
 // Files under <runs repo>/<kind>/<id>/*.json, such as scores/<runId>/<scorer>.json. A missing dir has none.
-function readNested<T>(runsRepoDir: string, kind: 'scores' | 'bench'): T[] {
+function readNested<T>(runsRepoDir: string, kind: 'scores' | 'bench' | 'improvements'): T[] {
   const root = join(runsRepoDir, kind)
   return subdirs(root).flatMap((id) => readdirSync(join(root, id)).filter((f) => f.endsWith('.json')).map((f) => readJsonFile<T>(join(root, id, f))))
 }
@@ -621,6 +777,9 @@ function db(runsRepoDir: string) {
     bench_id TEXT, task TEXT, harness TEXT, requested_model TEXT, model TEXT, factory_ref TEXT, factory_sha TEXT, base_sha TEXT,
     billing TEXT, pass INTEGER, check_output TEXT, input_tokens INTEGER, cache_read_tokens INTEGER, output_tokens INTEGER,
     cost_usd REAL, wall_time_s INTEGER, at TEXT, transcript TEXT, PRIMARY KEY (bench_id, task, harness, requested_model))`)
+  database.exec(`CREATE TABLE improvements (
+    id TEXT PRIMARY KEY, at TEXT, factory_sha TEXT, basis_runs INTEGER, basis_scores INTEGER, basis_failing_scores INTEGER, basis_benches TEXT,
+    harness TEXT, model TEXT, cost_usd REAL, wall_time_s INTEGER, changed_files TEXT, status TEXT)`)
   const insertRun = database.prepare(`INSERT INTO runs VALUES (${Array(21).fill('?').join(', ')})`)
   const insertStage = database.prepare(`INSERT INTO stages VALUES (${Array(15).fill('?').join(', ')})`)
   const insertScore = database.prepare(`INSERT INTO scores VALUES (${Array(12).fill('?').join(', ')})`)
@@ -645,8 +804,14 @@ function db(runsRepoDir: string) {
     insertBench.run(b.benchId, b.task, b.harness, b.requestedModel, b.model, b.factoryRef, b.factorySha, b.baseSha, b.billing, bool(b.pass),
       b.checkOutput, b.usage.inputTokens, b.usage.cacheReadTokens, b.usage.outputTokens, b.costUsd, b.wallTimeS, b.at, b.transcript)
   }
+  const improvements = readNested<Improvement>(runsRepoDir, 'improvements')
+  const insertImprovement = database.prepare(`INSERT INTO improvements VALUES (${Array(13).fill('?').join(', ')})`)
+  for (const i of improvements) {
+    insertImprovement.run(i.id, i.at, i.factorySha, i.basis.runs, i.basis.scores, i.basis.failingScores, i.basis.benches.join(','),
+      i.harness, i.model, i.costUsd, i.wallTimeS, JSON.stringify(i.changedFiles), i.status)
+  }
   database.close()
-  console.log(`db: ${records.length} runs, ${scores.length} scores, ${bench.length} bench results -> ${file}`)
+  console.log(`db: ${records.length} runs, ${scores.length} scores, ${bench.length} bench results, ${improvements.length} improvements -> ${file}`)
 }
 
 function report(runsRepoDir: string) {
@@ -685,8 +850,12 @@ function report(runsRepoDir: string) {
   const file = join(runsRepoDir, 'report.html')
   const scores = readNested<Score>(runsRepoDir, 'scores')
   const bench = readNested<BenchResult>(runsRepoDir, 'bench')
-  writeFileSync(file, renderReport({ generatedAt: new Date().toISOString(), rows, steps, scores, bench }))
-  console.log(`report: ${rows.length} runs, ${scores.length} scores, ${bench.length} bench results -> ${file}`)
+  const improvements = readNested<Improvement>(runsRepoDir, 'improvements').map((i) => {
+    const summary = join(runsRepoDir, 'improvements', i.id, 'summary.md')
+    return { ...i, headline: existsSync(summary) ? headline(readFileSync(summary, 'utf8')) : null }
+  })
+  writeFileSync(file, renderReport({ generatedAt: new Date().toISOString(), rows, steps, scores, bench, improvements }))
+  console.log(`report: ${rows.length} runs, ${scores.length} scores, ${bench.length} bench results, ${improvements.length} improvements -> ${file}`)
 }
 
 function runId() {
@@ -700,6 +869,18 @@ function secrets() {
 function runLink() {
   const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env
   return GITHUB_RUN_ID ? `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}` : 'local run'
+}
+
+// A model id pi cannot resolve fails every run that uses it, and a judge that fails leaves its scores pending forever.
+// pi lists a provider's models only when that provider has a key, so a placeholder key is enough and nothing is billed.
+function models() {
+  const ids = [...loadAgents(agentsDir), ...loadAgents(scorersDir)].map((a) => a.models.pi)
+  const missing = [...new Set(ids)].filter((id) => {
+    const listed = sh('docker', ['run', '--rm', '-e', 'HOME=/tmp/home', '-e', 'DEEPSEEK_API_KEY=placeholder', process.env.FACTORY_IMAGE ?? 'factory-agent', 'pi', '--list-models', id])
+    return !listed.split('\n').some((row) => row.split(/\s+/).slice(0, 2).join('/') === id)
+  })
+  if (missing.length) throw new Error(`pi does not know these models: ${missing.join(', ')}`)
+  console.log(`models: pi knows ${[...new Set(ids)].join(', ')}`)
 }
 
 const [command, ...args] = process.argv.slice(2)
@@ -719,8 +900,17 @@ const commands: Record<string, () => void> = {
   'score-save': scoreSave,
   'bench-run': benchRun,
   'bench-save': benchSave,
+  'improve-prepare': improvePrepare,
+  'improve-run': improveRun,
+  'improve-save': improveSave,
+  models,
   db: () => db(args[0] ?? '.'),
   report: () => report(args[0] ?? '.'),
+  findings: () => process.stdout.write(findingsMarkdown(readEvidence(args[0] ?? '.'))),
+  propose: () => {
+    if (!args[1]) throw new Error('usage: node src/cli.ts propose <runs-dir> <improvement-id>')
+    propose(args[0], args[1])
+  },
 }
 if (!commands[command]) {
   console.error(`usage: node src/cli.ts <${Object.keys(commands).join('|')}>`)

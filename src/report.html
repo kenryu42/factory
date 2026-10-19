@@ -70,10 +70,10 @@
   .stages { margin-bottom: 16px; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
-  .s-pr_opened, .s-spec_posted, .o-open, .v-approve { color: var(--ok); }
-  .s-no_changes, .o-closed { color: var(--muted); }
+  .s-pr_opened, .s-spec_posted, .s-proposed, .o-open, .v-approve { color: var(--ok); }
+  .s-no_changes, .s-no_change, .o-closed { color: var(--muted); }
   .s-agent_failed, .s-publish_failed, .o-reverted { color: var(--bad); }
-  .s-blocked_secret, .s-blocked_workflow_change, .v-request_changes { color: var(--warn); }
+  .s-blocked_secret, .s-blocked_workflow_change, .s-blocked_scope, .v-request_changes { color: var(--warn); }
   .o-merged { color: var(--merged); }
   .back { display: inline-block; margin-bottom: 12px; }
   .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 16px; margin-bottom: 16px; }
@@ -222,6 +222,7 @@
         tbody)),
       ...scoresSection(),
       ...benchSection(),
+      ...improvementsSection(),
     ]
   }
 
@@ -314,6 +315,21 @@
             h('td', { class: 'num' }, dur(Math.round(c.avgWallTimeS))),
             h('td', {}, c.pareto ? pill('sc-pass', 'frontier') : ''))))),
         scatter(b.configs)))))]
+  }
+
+  function improvementsSection() {
+    if (!data.improvements.length) return []
+    return [h('section', {}, h('h2', {}, 'Improvements'), h('div', { class: 'table-wrap' }, grid(
+      [['Date'], ['Id'], ['Status'], ['Summary'], ['Changed files'], ['Cost', 'num'], ['Agent and evidence']],
+      data.improvements.map((i) => h('tr', {},
+        h('td', { style: 'font-variant-numeric:tabular-nums;white-space:nowrap' }, date(i.at)),
+        h('td', { style: 'white-space:nowrap' }, i.id),
+        h('td', {}, pill('s-' + i.status, label(i.status))),
+        h('td', { style: 'white-space:normal;min-width:240px' }, i.headline ?? h('span', { class: 'muted' }, 'none')),
+        h('td', {}, i.changedFiles.length ? i.changedFiles.map((f) => h('div', {}, h('code', {}, f))) : h('span', { class: 'muted' }, 'none')),
+        h('td', { class: 'num' }, usd(i.costUsd)),
+        h('td', { class: 'muted', style: 'white-space:normal;min-width:200px' },
+          `${i.harness} (${i.model}) read ${i.basis.runs} runs, ${i.basis.failingScores} of ${i.basis.scores} scores failing${i.basis.benches.length ? `, ${i.basis.benches.length} benchmarks` : ''}`))))))]
   }
 
   // tail shows the last lines while collapsed, for output whose end matters, such as a test summary.

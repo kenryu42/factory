@@ -15,7 +15,7 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 
 Every comment the factory posts is scrubbed of known secrets and checked with gitleaks first.
 
-`agents/spec.md`, `agents/implement.md`, and `agents/review.md` define the agents: each one's prompt, default harness, and model for each harness. To pick the implement harness for one issue, add a `harness:claude-code` or `harness:pi` label before you add `factory`. The spec and review agents always use their own default, so reviews stay comparable across harnesses.
+`agents/spec.md`, `agents/implement.md`, and `agents/review.md` define the run's agents: each one's prompt, default harness, and model for each harness. To pick the implement harness for one issue, add a `harness:claude-code` or `harness:pi` label before you add `factory`. The spec and review agents always use their own default, so reviews stay comparable across harnesses.
 
 ### Plan first
 
@@ -44,6 +44,23 @@ The workflow has three steps: `score-prepare` (FACTORY_GH_TOKEN) gathers the evi
 - `bench_id`: the results directory. The default is the workflow run id.
 
 For each task and config, `bench-run` (model credentials only) copies one fixed commit of the target repo's default branch, runs the implement agent on the task's issue text with that harness and model, and grades the tree with the task's check. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` and the scrubbed transcript next to it.
+
+## Improve the factory
+
+`examples/improve.yml` in a target repo calls `.github/workflows/improve.yml` on demand. The improve agent (`agents/improve.md`) reads what the scorers, reviews, and benchmarks found, picks the one or two most frequent or costly failure patterns, and edits the agent prompts in `agents/` (never its own prompt or the judges) in a checkout of this repo to fix them. Its optional `harness` input picks claude-code or pi.
+
+- `improve-prepare` (FACTORY_GH_TOKEN) builds `findings.md` from `factory-runs`: run counts by status, each scorer's pass/fail/unknown per implement harness, every failing score with its run and the judge's reason, the changes the review approved that then failed correctness (with the review's text), how revise rounds turned out, and each benchmark's pass rate per config. Check output is reduced to how many of the hidden check's tests failed and which of the repo's own test files failed, so the agent never sees what the hidden checks test. It skips the run when nothing has failed yet. `node src/cli.ts findings ../factory-runs` prints the same file locally.
+- `improve-run` (model credentials only) runs the agent with the checkout at `/work` and `findings.md` at `/input`.
+- `improve-save` (FACTORY_GH_TOKEN) diffs the agent's tree against an untouched copy and pushes `improvements/<id>/` to `factory-runs`: `improvement.json`, `findings.md`, and, unless the proposal is blocked, `patch.diff`, `summary.md`, and the scrubbed transcript `improve.jsonl`. A change to anything but `agents/*.md`, or to `agents/improve.md`, is `blocked_scope`, and gitleaks or a known secret in the patch or summary is `blocked_secret`.
+
+The factory's token cannot write to this repo, so you open the pull request yourself from a clean checkout of this repo:
+
+```sh
+git -C ../factory-runs pull
+node src/cli.ts propose ../factory-runs <improvement-id>
+```
+
+It refuses a dirty working tree and any patch outside `agents/` and `scorers/`. Otherwise it creates `improve/<id>` at the commit the agent read, applies the patch, commits it as `feat(agents): <the summary's first line>`, pushes it, and opens a pull request with the summary through your `gh` login. Before merging, run the bench with `factory_ref: improve/<id>` and compare it with `main`.
 
 ## Set up a target repo
 
@@ -80,6 +97,8 @@ Below the runs, the page shows each scorer's pass rate per implement harness and
 
 The report asks GitHub for each PR's state through your `gh` login. A PR counts as reverted when a merged PR in the same repo says `Reverts <repo>#<number>`, which is what GitHub's Revert button writes. Human touches are the comments, reviews, and commits on the PR by the repo owner. Bots and the factory's own commits do not count. If `gh` cannot look up a PR, the report prints a warning and leaves that run's outcome blank.
 
+The page ends with each improvement: its status, the first line of its summary, the files it changed, and its cost.
+
 For your own queries, build a SQLite database from the run files:
 
 ```sh
@@ -88,6 +107,7 @@ sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) fro
 sqlite3 ../factory-runs/runs.sqlite 'select agent, verdict, count(*) from stages where agent = "review" group by verdict'
 sqlite3 ../factory-runs/runs.sqlite 'select scorer, avg(pass), count(*) from scores group by scorer'
 sqlite3 ../factory-runs/runs.sqlite 'select bench_id, harness, requested_model, avg(pass), avg(cost_usd) from bench group by 1, 2, 3'
+sqlite3 ../factory-runs/runs.sqlite 'select id, status, changed_files, cost_usd from improvements'
 ```
 
 Both commands write generated files into the `factory-runs` checkout. Do not commit `report.html` or `runs.sqlite`; add them to that repo's `.gitignore`.

@@ -6,8 +6,10 @@ import type { RunRecord, Step } from './types.ts'
 
 // The deterministic scorer. Every other scorer is a judge file in scorers/.
 export const CORRECTNESS = 'correctness'
+// The name the task's hidden check gets in the graded tree.
+export const CHECK_FILE = 'test/zz-bench-check.test.js'
 const MAX_TOOL_OUTPUT = 2000
-const CHECK_TAIL_LINES = 40
+const CHECK_TAIL_LINES = 80
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000
 
 // Scorers grade implement runs that pushed a PR branch. Correctness also needs a bench task to check against.
@@ -22,7 +24,7 @@ export function pendingScores(records: RunRecord[], scorers: string[], existingF
 }
 
 // A fence longer than any backtick run in the text, so tool output can never close it early.
-function fenced(text: string): string {
+export function fenced(text: string): string {
   const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((m) => m.length))
   const fence = '`'.repeat(longest + 1)
   return `${fence}\n${text}\n${fence}`
@@ -48,13 +50,13 @@ export function transcriptMarkdown(stages: { name: string; steps: Step[] | null 
 
 export type Grade = { pass: boolean | null; reason: string }
 
-// Runs the tree's whole test suite with the task's check added as test/zz-bench-check.test.js. It passes only
+// Runs the tree's whole test suite with the task's check added as CHECK_FILE. It passes only
 // when every test passes, so a change that breaks the repo's own tests fails too. `wrap` is the command that runs
 // node, such as `docker run ... <image>`; without it node runs on the host. The tree is modified, so pass a copy.
 export function gradeTree(tree: string, checkFile: string, wrap: string[] = []): Grade {
   if (!existsSync(checkFile)) return { pass: null, reason: `no check at ${checkFile}` }
   mkdirSync(join(tree, 'test'), { recursive: true })
-  copyFileSync(checkFile, join(tree, 'test', 'zz-bench-check.test.js'))
+  copyFileSync(checkFile, join(tree, CHECK_FILE))
   const log = join(mkdtempSync(join(tmpdir(), 'check-')), 'output.txt')
   const fd = openSync(log, 'w')
   // A test runner that is itself under `node --test` sets this, and it would change the child's reporting.
