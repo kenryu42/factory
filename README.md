@@ -1,12 +1,12 @@
 # factory
 
-A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code or Pi) works on it in a container and opens a pull request, a review agent reviews it, and the coding agent gets one round to fix what the review found. Label an issue `factory:spec` first to get a plan you can edit before any code is written. Every run leaves a record with its cost, tokens, and scrubbed transcripts in a private repo.
+A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code or Pi) works on it in a container and opens a pull request, a review agent reviews it, and the coding agent gets one round to fix what the review found. Label an issue `factory:spec` first to get a plan you can edit before any code is written, and label the pull request `factory:revise` to send your own review comments back to the coding agent. Every run leaves a record with its cost, tokens, and scrubbed transcripts in a private repo.
 
 ## How a run works
 
 `examples/factory.yml` in a target repo calls `.github/workflows/run.yml` in this repo. That workflow runs `src/cli.ts` one step at a time. Each step after `guard` reads what earlier steps left in the run directory and does nothing when its stage does not apply.
 
-1. `guard` reads the issue event. It starts a run only when the repo owner added `factory` or `factory:spec` to an issue the owner wrote. For `factory`, it also looks for the owner's latest spec comment on the issue and takes it as the approved plan.
+1. `guard` reads the label event. It starts a run only when the repo owner added `factory` or `factory:spec` to an issue the owner wrote, or `factory:revise` to a factory pull request (see [Ask for a revision](#ask-for-a-revision)). For `factory`, it also looks for the owner's latest spec comment on the issue and takes it as the approved plan.
 2. `agent 0` runs an agent inside the `docker/` image on a checkout of the target repo. The container gets one model credential and no GitHub token. For `factory:spec` it runs the spec agent on a read-only checkout; for `factory` it runs the implement agent with the issue and the approved plan.
 3. `publish 0` posts the spec agent's plan as an issue comment, or copies the implement agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
 4. `review 0` runs the review agent on a copy of the published tree, with the issue, the plan, and the diff mounted read-only. It ends with `VERDICT: approve` or `VERDICT: request_changes`. `respond 0` posts the review on the pull request.
@@ -23,11 +23,21 @@ Every comment the factory posts is scrubbed of known secrets and checked with gi
 2. Edit that comment until the plan is what you want. Only your own comments count, so nobody else can plant a plan.
 3. Add `factory`. The implement agent follows the plan, and the review agent checks the change against it.
 
+### Ask for a revision
+
+1. Leave comments on a pull request the factory opened: conversation comments, a review, or inline comments on the diff.
+2. Add `factory:revise` to the pull request. The guard reads the pull request from the API and runs only when you added the label, the pull request is open, you opened it (the factory opens them with your token), and its head is a `factory/issue-<n>-…` branch in this repo, not a fork.
+3. The implement agent runs on the pull request's head with issue `<n>`, the approved plan, and every comment you wrote after the factory's last commit on the branch. Inline comments come with their `file:line`. Comments by anyone else, and the factory's own comments (marked `<!-- factory -->`), never reach it.
+4. `publish 0` pushes one commit to the same branch, fast-forward only, so a commit pushed while the agent worked makes the push fail instead of being lost. Then the review and its one revise round run as usual, with your comments in `/input/feedback.md`. The diff and the record's `baseSha` start at the merge base with the default branch.
+5. The run removes the label when it starts, so add it again for another round. A run that finds no new comment from you is skipped and leaves the label in place.
+
+The record has `kind: "revise"`, `trigger: "pr#<number>"`, and `status: "pr_updated"` when it pushed. Its `implement-0` stage is the revision you asked for.
+
 To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`. Each task in `bench/tasks/<task-id>/` has the issue text (`task.md`) and a hidden check (`check.test.js`) that the agent never sees.
 
 ## Score runs
 
-`examples/score.yml` in a target repo calls `.github/workflows/score.yml` on demand. It grades every implement run in `factory-runs` that opened a PR and has no score yet, and pushes one file per run and scorer to `scores/<run-id>/<scorer>.json`. A score is never recomputed. Each grades the last commit the factory pushed to the PR, so later human commits do not count.
+`examples/score.yml` in a target repo calls `.github/workflows/score.yml` on demand. It grades every implement run in `factory-runs` that opened a PR and has no score yet (revise runs follow your feedback, so they are not graded), and pushes one file per run and scorer to `scores/<run-id>/<scorer>.json`. A score is never recomputed. Each grades the last commit the factory pushed to the PR, so later human commits do not count.
 
 The judges also grade every bench cell whose transcript and diff were stored and that has no score yet, and push `scores/bench/<bench-id>/<cell>/<scorer>.json`. A cell's `issue.md` is its task's `task.md`, and its correctness is the cell's own check. Each score names what it grades in `subject`: `{ "kind": "run", "runId" }` or `{ "kind": "bench", "benchId", "cell" }`.
 
@@ -83,7 +93,7 @@ It refuses a dirty working tree and any patch outside `agents/` and `scorers/`. 
 
 	The example runs on GitHub-hosted `ubuntu-latest`. To run on your own Mac, uncomment its `with:` block, which selects a self-hosted runner labeled `factory`. Do that only in repos where you alone can open pull requests, as GitHub's [security guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use) explains. The Mac needs Docker, git, and gh on the runner's PATH.
 4. In the target repo settings under **Actions**, set workflow permissions to read-only and require approval for workflows from all outside contributors.
-5. Create the labels `factory`, `factory:spec`, `harness:claude-code`, and `harness:pi`.
+5. Create the labels `factory`, `factory:spec`, `factory:revise`, `harness:claude-code`, and `harness:pi`.
 
 ## Query your runs
 

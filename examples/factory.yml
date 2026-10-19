@@ -5,14 +5,20 @@ name: factory
 on:
   issues:
     types: [labeled]
+  # Labels on pull requests arrive as pull_request events, not issues events.
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
   issues: read
+  pull-requests: read
 
 jobs:
   factory:
-    if: github.event.label.name == 'factory' || github.event.label.name == 'factory:spec'
+    if: >-
+      (github.event_name == 'issues' && (github.event.label.name == 'factory' || github.event.label.name == 'factory:spec')) ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'factory:revise')
     uses: kenryu42/factory/.github/workflows/run.yml@main
     # Runs on GitHub-hosted runners. To run on your own Mac instead, uncomment the two lines below,
     # but only in repos where you alone can open pull requests.

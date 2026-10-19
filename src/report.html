@@ -70,7 +70,7 @@
   .stages { margin-bottom: 16px; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
-  .s-pr_opened, .s-spec_posted, .s-proposed, .o-open, .v-approve { color: var(--ok); }
+  .s-pr_opened, .s-pr_updated, .s-spec_posted, .s-proposed, .o-open, .v-approve { color: var(--ok); }
   .s-no_changes, .s-no_change, .o-closed { color: var(--muted); }
   .s-agent_failed, .s-publish_failed, .o-reverted { color: var(--bad); }
   .s-blocked_secret, .s-blocked_workflow_change, .s-blocked_scope, .v-request_changes { color: var(--warn); }
@@ -137,7 +137,6 @@
   const date = (iso) => iso.slice(0, 16).replace('T', ' ')
   const dur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`)
   const label = (s) => s.replace(/_/g, ' ')
-  const issueNumber = (r) => (r.trigger.match(/^issue#(\d+)$/) || [])[1]
   const prNumber = (url) => (url ? '#' + url.split('/').pop() : '')
   const pill = (cls, text) => h('span', { class: 'pill ' + cls }, text)
   const verdict = (v) => (v ? pill('v-' + v, label(v)) : h('span', { class: 'muted' }, 'none'))
@@ -149,8 +148,7 @@
   const stageHref = (r, s) => '#run=' + encodeURIComponent(r.id) + '&stage=' + encodeURIComponent(stageKey(s))
 
   function issueLink(r) {
-    const n = issueNumber(r)
-    return n ? link(`https://github.com/${r.repo}/issues/${n}`, `${r.repo}#${n}`) : `${r.repo} ${r.trigger}`
+    return link(`https://github.com/${r.repo}/issues/${r.issueNumber}`, `${r.repo}#${r.issueNumber}`)
   }
 
   function tile(lbl, value) {
@@ -203,7 +201,7 @@
       h('td', {}, r.harness),
       h('td', { class: 'muted' }, r.model),
       h('td', {}, pill('s-' + r.status, label(r.status))),
-      h('td', {}, r.kind === 'implement' ? verdict(r.verdict) : ''),
+      h('td', {}, r.kind !== 'spec' ? verdict(r.verdict) : ''),
       h('td', {}, scorePill(scoresOf(r.id).find((s) => s.scorer === 'correctness'), true)),
       h('td', {}, judgesCell(r.id)),
       h('td', {}, r.outcome ? pill('o-' + r.outcome, r.outcome) : h('span', { class: 'muted' }, r.prUrl ? 'unknown' : '')),
@@ -449,7 +447,7 @@
           field('Kind', r.task ? `${r.kind} · task ${r.task}` : r.kind),
           field('Harness', `${r.harness} (${r.model})`),
           field('Status', pill('s-' + r.status, label(r.status))),
-          field('Final verdict', r.kind === 'implement' ? verdict(r.verdict) : 'n/a'),
+          field('Final verdict', r.kind !== 'spec' ? verdict(r.verdict) : 'n/a'),
           field('Outcome', r.outcome ? pill('o-' + r.outcome, r.outcome) : r.prUrl ? 'unknown' : 'no PR'),
           field('Human touches', r.humanTouches === null ? 'n/a' : String(r.humanTouches)),
           field('Cost', usd(r.costUsd)),

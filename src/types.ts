@@ -21,21 +21,38 @@ export type Issue = {
   body: string
 }
 
-// A `factory:spec` label asks for a plan, a `factory` label for a pull request.
-export type RunKind = 'spec' | 'implement'
+// On an issue, a `factory:spec` label asks for a plan and a `factory` label for a pull request.
+// On a factory pull request, a `factory:revise` label asks for one more commit that addresses the owner's comments.
+export type RunKind = 'spec' | 'implement' | 'revise'
 
-export type Plan = {
+// The factory pull request a revise run pushes to.
+export type PullRequest = {
+  number: number
+  url: string
+  branch: string
+  // The branch head the run starts from. The push only fast-forwards it, so a commit pushed meanwhile is never lost.
+  headSha: string
+  // The merge base with the default branch, so the diff and the record cover the whole pull request.
+  baseSha: string
+}
+
+// One comment the owner left on a pull request. location is `path:line` for an inline review comment.
+export type Feedback = { at: string; location: string | null; body: string }
+
+type PlanBase = {
   runId: string
-  kind: RunKind
   issue: Issue
   baseBranch: string
-  // From a harness:<name> label. It picks the implement harness only. null means the agent's default.
+  // From a harness:<name> label on the issue. It picks the implement harness only. null means the agent's default.
   harness: HarnessName | null
   // The plan in the owner's latest spec comment on the issue, which the owner may have edited.
   spec: string | null
   // Benchmark task id from a `<!-- bench:<id> -->` marker in the issue body.
   task: string | null
 }
+export type IssuePlan = PlanBase & { kind: 'spec' | 'implement' }
+export type RevisePlan = PlanBase & { kind: 'revise'; pr: PullRequest; feedback: Feedback[] }
+export type Plan = IssuePlan | RevisePlan
 
 export type Usage = {
   // Input tokens not served from cache, including tokens written to cache.
@@ -58,7 +75,8 @@ export type Billing = 'subscription' | 'api'
 
 export type Verdict = 'approve' | 'request_changes'
 
-// One agent invocation. Round 0 is the first pass; round 1 is the revise round after a review asks for changes.
+// One agent invocation. Round 0 is the first pass, which in a revise run is the revision the owner asked for.
+// Round 1 is the revise round after a review asks for changes.
 export type StageRun = {
   agent: AgentName
   round: number
@@ -78,7 +96,7 @@ export type StageRun = {
 export type StageResult = Omit<StageRun, 'transcript'> & { finalText: string; baseSha: string }
 
 export type RunStatus =
-  | 'pr_opened' | 'spec_posted' | 'no_changes' | 'agent_failed' | 'publish_failed' | 'blocked_secret' | 'blocked_workflow_change'
+  | 'pr_opened' | 'pr_updated' | 'spec_posted' | 'no_changes' | 'agent_failed' | 'publish_failed' | 'blocked_secret' | 'blocked_workflow_change'
 
 export type PublishResult = {
   status: RunStatus

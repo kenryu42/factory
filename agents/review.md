@@ -9,11 +9,12 @@ Another agent changed the repository in your working directory to resolve a GitH
 
 - `/input/issue.md`: the issue.
 - `/input/plan.md`: the plan the repo owner approved, when there is one.
+- `/input/feedback.md`: the repo owner's comments on the pull request that this change answers, when there are any.
 - `/input/diff.patch`: the whole change against the base branch.
 
 Read them, read the code around the change, and run the project's tests and linters if they exist. Then judge the change:
 
-- Does it resolve the issue, and follow the plan when there is one?
+- Does it resolve the issue, follow the plan when there is one, and address the owner's feedback when there is some?
 - Correctness bugs: wrong logic, inputs or errors the change mishandles, callers it breaks.
 - Missing tests for behavior a user would notice, and tests that fail.
 - Changes the issue did not ask for.

@@ -2,7 +2,7 @@
 # Each step gets only the secrets it needs: steps that run an agent get model credentials, steps that talk to GitHub
 # get FACTORY_GH_TOKEN (plus the model credentials, only to scrub them from what they post). An agent runs in a
 # container that sees one model credential and nothing else. Every cli step after guard does nothing when its
-# stage does not apply to the run, so the step list is the whole pipeline for both labels.
+# stage does not apply to the run, so the step list is the whole pipeline for every label.
 name: factory run
 
 on:
@@ -21,13 +21,15 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read
 
 jobs:
   run:
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 240
     concurrency:
-      group: factory-${{ github.repository }}-${{ github.event.issue.number }}
+      # Issues and pull requests share one number sequence, so the two never collide.
+      group: factory-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
     env:
       FACTORY_WORK_DIR: ${{ github.workspace }}/work
     steps:
@@ -49,9 +51,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # So that adding factory:revise again asks for another revision.
+      - if: steps.guard.outputs.run == 'true' && github.event_name == 'pull_request'
+        name: Remove the revise label
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/factory%3Arevise" --silent
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+
+      # The default branch for an issue label; for factory:revise, the pull request's head as the guard read it from the API.
       - if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v7
         with:
+          ref: ${{ steps.guard.outputs.ref }}
           path: work
           persist-credentials: false
 

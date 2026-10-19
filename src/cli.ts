@@ -1,8 +1,8 @@
 // Each subcommand is one step of .github/workflows/run.yml. Steps share files in FACTORY_RUN_DIR,
 // and a step whose stage does not apply to this run does nothing.
-//   guard           decide whether the issue event starts a run, find the approved plan   (github.token)
+//   guard           decide whether the issue or pull request label starts a run, gather the plan and the owner's feedback   (github.token)
 //   preflight       check FACTORY_GH_TOKEN can push to the repo and factory-runs before any model is paid   (FACTORY_GH_TOKEN)
-//   agent <round>   round 0: the spec or implement agent; round 1: implement again after a review asks for changes   (model key only)
+//   agent <round>   round 0: the spec or implement agent (on the PR head for a revise run); round 1: implement again after a review asks for changes   (model key only)
 //   publish <round> post the plan, or copy the agent's tree into a fresh clone and open or update the PR   (FACTORY_GH_TOKEN)
 //   review <round>  run the review agent on the tree that round published   (model key only)
 //   respond <round> post that review on the PR   (FACTORY_GH_TOKEN)
@@ -31,7 +31,10 @@ import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { cellName, parseConfigs, parseTask } from './bench.ts'
 import { loadAgent, loadAgents, parseScore, parseVerdict } from './agents.ts'
-import { approvedSpec, decide, splitBenchMarker, SPEC_MARKER, type IssueComment } from './guard.ts'
+import {
+  approvedSpec, decide, decideRevise, type Decision, FACTORY_EMAIL, FACTORY_MARKER, reviseTarget, splitBenchMarker, SPEC_MARKER,
+  type ApiCommit, type ApiIssue, type ApiPull, type IssueComment, type Review, type ReviewComment,
+} from './guard.ts'
 import { credential, harnesses } from './harnesses.ts'
 import { basis, findingsMarkdown, headline, patchProblems, type Evidence } from './improve.ts'
 import { prOutcome, renderReport, type PrView, type ReportModel } from './report.ts'
@@ -40,7 +43,7 @@ import {
 } from './score.ts'
 import { scrub } from './scrub.ts'
 import {
-  isHarnessName, type AgentName, type BenchResult, type Billing, type HarnessName, type Improvement, type ImprovementStatus, type Issue, type Plan,
+  isHarnessName, type AgentName, type BenchResult, type Billing, type Feedback, type HarnessName, type Improvement, type ImprovementStatus, type Issue, type IssuePlan, type Plan, type RevisePlan, type RunKind,
   type PublishResult, type ReportRow, type RunRecord, type RunStatus, type Score, type ScoreSubject, type StageResult, type StageRun, type Transcript,
 } from './types.ts'
 
@@ -53,7 +56,6 @@ const agentsDir = join(factoryDir, 'agents')
 const scorersDir = join(factoryDir, 'scorers')
 const tasksDir = join(factoryDir, 'bench', 'tasks')
 const checkFile = (task: string) => join(tasksDir, task, 'check.test.js')
-const FACTORY_EMAIL = 'factory@users.noreply.github.com'
 const image = () => process.env.FACTORY_IMAGE ?? 'factory-agent'
 const env = (name: string) => {
   const value = process.env[name]
@@ -93,9 +95,11 @@ const readPlan = () => readJson<Plan>('plan.json')!
 const stageName = (agent: AgentName, round: number) => `${agent}-${round}`
 const stage = (agent: AgentName, round: number) => readJson<StageResult>(`${stageName(agent, round)}.json`)
 const published = (round: number) => readJson<PublishResult>(`publish-${round}.json`)
+// The agent a run is about. A revise run is the implement agent again, on the pull request's branch.
+const MAIN_AGENT: Record<RunKind, AgentName> = { spec: 'spec', implement: 'implement', revise: 'implement' }
 // A revise round runs only when the round before it pushed a commit and its review asked for changes.
 const revising = (plan: Plan, round: number) =>
-  round > 0 && plan.kind === 'implement' && !!published(round - 1)?.sha && stage('review', round - 1)?.verdict === 'request_changes'
+  round > 0 && plan.kind !== 'spec' && !!published(round - 1)?.sha && stage('review', round - 1)?.verdict === 'request_changes'
 const usd = (n: number | null) => (n === null ? 'n/a' : `$${n.toFixed(2)}`)
 const about = (s: StageResult) => `\`${s.agent}\` on ${s.harness} (\`${s.model}\`), ${usd(s.usage.costUsd)}, ${s.wallTimeS}s`
 const issueSection = (issue: Issue) => `## Issue #${issue.number}: ${issue.title}\n\n${issue.body}`
@@ -111,24 +115,59 @@ function preflight() {
   console.log(`preflight: FACTORY_GH_TOKEN can push to ${issue.repo} and its factory-runs`)
 }
 
+// Reads GitHub with the workflow's read-only github.token.
+const ghJson = <T>(path: string): T => JSON.parse(sh('gh', ['api', path], { maxBuffer: 64 * 1024 * 1024 }))
+const ghPages = <T>(path: string): T[] =>
+  (JSON.parse(sh('gh', ['api', '--paginate', '--slurp', path], { maxBuffer: 64 * 1024 * 1024 })) as T[][]).flat()
+
 function guard() {
-  const decision = decide(JSON.parse(readFileSync(env('GITHUB_EVENT_PATH'), 'utf8')))
+  const event = JSON.parse(readFileSync(env('GITHUB_EVENT_PATH'), 'utf8'))
+  const decision = process.env.GITHUB_EVENT_NAME === 'pull_request' ? reviseDecision(event) : issueDecision(event)
   if (!decision.run) {
     console.log(`skip: ${decision.reason}`)
     setOutput('run', 'false')
     return
   }
-  const { kind, issue, harness, task } = decision.plan
-  let spec: string | null = null
-  if (kind === 'implement') {
-    const pages: IssueComment[][] = JSON.parse(sh('gh', ['api', '--paginate', '--slurp', `repos/${issue.repo}/issues/${issue.number}/comments`], { maxBuffer: 64 * 1024 * 1024 }))
-    spec = approvedSpec(pages.flat(), issue.repo.split('/')[0])
-  }
   mkdirSync(runDir(), { recursive: true })
-  const plan: Plan = { ...decision.plan, spec, runId: runId() }
+  const plan: Plan = { ...decision.plan, runId: runId() }
   writeJson('plan.json', plan)
-  console.log(`run: ${kind} ${issue.repo}#${issue.number} harness=${harness ?? 'default'} plan=${spec ? 'approved' : 'none'} task=${task ?? 'none'}`)
+  const { kind, issue, harness, spec, task } = plan
+  const on = plan.kind === 'revise' ? ` pr#${plan.pr.number} feedback=${plan.feedback.length}` : ''
+  console.log(`run: ${kind} ${issue.repo}#${issue.number}${on} harness=${harness ?? 'default'} plan=${spec ? 'approved' : 'none'} task=${task ?? 'none'}`)
+  // The work tree is checked out at this ref: the pull request's head for a revise run, the default branch otherwise.
+  if (plan.kind === 'revise') setOutput('ref', plan.pr.headSha)
   setOutput('run', 'true')
+}
+
+type Draft = Omit<IssuePlan, 'runId'> | Omit<RevisePlan, 'runId'>
+
+function issueDecision(event: any): Decision<Draft> {
+  const decision = decide(event)
+  if (!decision.run) return decision
+  const { kind, issue } = decision.plan
+  const spec = kind === 'implement' ? approvedSpec(ghPages<IssueComment>(`repos/${issue.repo}/issues/${issue.number}/comments`), issue.repo.split('/')[0]) : null
+  return { run: true, plan: { ...decision.plan, spec } }
+}
+
+// Everything about the pull request comes from the API, not from the event.
+function reviseDecision(event: any): Decision<Draft> {
+  const repo: string = event.repository.full_name
+  const pr = ghJson<ApiPull>(`repos/${repo}/pulls/${event.pull_request.number}`)
+  const target = reviseTarget(event, pr)
+  if (!target.run) return target
+  const issue = target.plan
+  return decideRevise(event, {
+    pr,
+    issue: ghJson<ApiIssue>(`repos/${repo}/issues/${issue}`),
+    issueComments: ghPages<IssueComment>(`repos/${repo}/issues/${issue}/comments`),
+    commits: ghPages<ApiCommit>(`repos/${repo}/pulls/${pr.number}/commits`),
+    thread: {
+      comments: ghPages<IssueComment>(`repos/${repo}/issues/${pr.number}/comments`),
+      reviewComments: ghPages<ReviewComment>(`repos/${repo}/pulls/${pr.number}/comments`),
+      reviews: ghPages<Review>(`repos/${repo}/pulls/${pr.number}/reviews`),
+    },
+    mergeBase: ghJson<{ merge_base_commit: { sha: string } }>(`repos/${repo}/compare/${event.repository.default_branch}...${pr.head.sha}`).merge_base_commit.sha,
+  })
 }
 
 const docker = (mounts: string[], flags: string[]) => [
@@ -196,10 +235,14 @@ function runStage(agent: AgentName, round: number, context: string, mounts: stri
   if (agent === 'review') console.log(`${name}: verdict=${result.verdict}`)
 }
 
+const feedbackSection = (feedback: Feedback[]) => ['## Owner feedback on the pull request',
+  ...feedback.map((f) => `### ${f.location ? `On \`${f.location}\`` : 'Comment'}\n\n${f.body}`)].join('\n\n')
+
 function implementContext(plan: Plan, review: string | null) {
   return [
     issueSection(plan.issue),
     plan.spec && `## Approved plan\n\n${plan.spec}`,
+    plan.kind === 'revise' && scrub(feedbackSection(plan.feedback), secrets()),
     review && `## Review findings\n\n${scrub(review, secrets())}`,
   ].filter(Boolean).join('\n\n')
 }
@@ -208,7 +251,8 @@ function agent(round: number) {
   const plan = readPlan()
   const work = resolve(env('FACTORY_WORK_DIR'))
   if (round === 0) {
-    const baseSha = sh('git', ['-C', work, 'rev-parse', 'HEAD'])
+    // A revise run's work tree is the pull request's head, and its base is where the pull request branched off.
+    const baseSha = plan.kind === 'revise' ? plan.pr.baseSha : sh('git', ['-C', work, 'rev-parse', 'HEAD'])
     if (plan.kind === 'spec') return runStage('spec', 0, issueSection(plan.issue), [`${work}:/work:ro`], baseSha)
     return runStage('implement', 0, implementContext(plan, null), [`${work}:/work`], baseSha)
   }
@@ -224,7 +268,8 @@ type Target = { issue: Issue } | { pr: string }
 function post(target: Target, body: string): boolean {
   const text = scrub(body, secrets())
   const clean = !hasLeak(text)
-  writeFileSync(runFile('comment.md'), clean ? text : `A factory comment was withheld because gitleaks flagged a possible secret in it. [Run log](${runLink()})`)
+  const comment = clean ? text : `A factory comment was withheld because gitleaks flagged a possible secret in it. [Run log](${runLink()})`
+  writeFileSync(runFile('comment.md'), 'pr' in target ? `${comment}\n\n${FACTORY_MARKER}` : comment)
   const where = 'pr' in target ? ['pr', 'comment', target.pr] : ['issue', 'comment', String(target.issue.number), '--repo', target.issue.repo]
   sh('gh', [...where, '--body-file', runFile('comment.md')], { env: { ...process.env, GH_TOKEN: env('FACTORY_GH_TOKEN') } })
   return clean
@@ -252,17 +297,20 @@ function publishSpec(plan: Plan) {
   done(post({ issue: plan.issue }, `${SPEC_MARKER}\n\n${result.finalText.trim()}`) ? 'spec_posted' : 'blocked_secret')
 }
 
-// Round 0 opens the pull request. A revise round pushes one more commit to its branch.
+// Round 0 of an implement run opens the pull request. Every other round pushes one more commit to its branch.
 function publishChange(plan: Plan, round: number) {
   const result = stage('implement', round)
   const prev = round > 0 ? published(round - 1)! : null
+  // The pull request this round pushes to and the commit its work tree started from, or null when this round opens it.
+  const onto = prev ? { branch: prev.branch!, prUrl: prev.prUrl!, sha: prev.sha! }
+    : plan.kind === 'revise' ? { branch: plan.pr.branch, prUrl: plan.pr.url, sha: plan.pr.headSha } : null
   const token = env('FACTORY_GH_TOKEN')
   const { repo, number } = plan.issue
   const runUrl = runLink()
-  const target: Target = prev ? { pr: prev.prUrl! } : { issue: plan.issue }
-  const nothing = prev ? 'so the pull request was not updated' : 'so no pull request was opened'
+  const target: Target = onto ? { pr: onto.prUrl } : { issue: plan.issue }
+  const nothing = onto ? 'so the pull request was not updated' : 'so no pull request was opened'
   const done = (status: RunStatus, message: string, pushed: Partial<PublishResult> = {}) => {
-    const p: PublishResult = { status, branch: prev?.branch ?? null, prUrl: prev?.prUrl ?? null, sha: null, ...pushed }
+    const p: PublishResult = { status, branch: onto?.branch ?? null, prUrl: onto?.prUrl ?? null, sha: null, ...pushed }
     writeJson(`publish-${round}.json`, p)
     post(target, message)
     console.log(`publish ${round}: ${status}${p.prUrl ? ` ${p.prUrl}` : ''}`)
@@ -278,8 +326,8 @@ function publishChange(plan: Plan, round: number) {
   rmSync(pub, { recursive: true, force: true })
   sh('git', ['clone', '--quiet', `https://x-access-token:${token}@github.com/${repo}.git`, pub])
   const baseSha = stage('implement', 0)!.baseSha
-  const branch = prev?.branch ?? `factory/issue-${number}-${plan.runId}`
-  sh('git', ['-C', pub, 'checkout', '--quiet', '-b', branch, prev ? `origin/${branch}` : baseSha])
+  const branch = onto?.branch ?? `factory/issue-${number}-${plan.runId}`
+  sh('git', ['-C', pub, 'checkout', '--quiet', '-b', branch, onto?.sha ?? baseSha])
   // --checksum: an edit that keeps a file's size within the clone's second would pass rsync's size-and-mtime check.
   sh('rsync', ['-a', '--checksum', '--delete', '--exclude=.git', `${resolve(env('FACTORY_WORK_DIR'))}/`, `${pub}/`])
   sh('git', ['-C', pub, 'add', '-A'])
@@ -292,19 +340,25 @@ function publishChange(plan: Plan, round: number) {
     return done('blocked_workflow_change', `Blocked: the agent changed files under \`.github/\`, which the factory never pushes. [Run log](${runUrl})`)
   }
   const footer = `---\nfactory run: ${about(result)}. [Run log](${runUrl})`
-  const body = scrub(prev ? `Revised after review.\n\n${result.finalText}\n\n${footer}` : `${result.finalText}\n\nCloses #${number}.\n\n${footer}`, secrets())
+  const why = prev ? 'review' : 'your feedback'
+  const body = scrub(onto ? `Revised after ${why}.\n\n${result.finalText}\n\n${footer}` : `${result.finalText}\n\nCloses #${number}.\n\n${footer}`, secrets())
   if (hasLeak(sh('git', ['-C', pub, 'diff', '--cached'], { maxBuffer: 64 * 1024 * 1024 }) + '\n' + body)) {
     return done('blocked_secret', `Blocked: gitleaks flagged a possible secret in the agent's changes or summary, so nothing was pushed. [Run log](${runUrl})`)
   }
 
   const git = (...args: string[]) => sh('git', ['-C', pub, '-c', 'core.hooksPath=/dev/null', ...args], { maxBuffer: 64 * 1024 * 1024 })
   git('-c', 'user.name=factory', '-c', `user.email=${FACTORY_EMAIL}`,
-    'commit', '--quiet', '-m', prev ? `Address review of #${number}` : `${plan.issue.title}\n\nResolves #${number}.`)
-  git('push', '--quiet', ...(prev ? [] : ['--force']), 'origin', branch)
+    'commit', '--quiet', '-m', prev ? `Address review of #${number}` : onto ? `Address feedback on #${number}` : `${plan.issue.title}\n\nResolves #${number}.`)
+  // Onto an existing branch the push only fast-forwards, so it fails instead of dropping a commit pushed meanwhile.
+  const push = spawnSync('git', ['-C', pub, 'push', '--quiet', ...(onto ? [] : ['--force']), 'origin', branch], { encoding: 'utf8' })
+  if (push.status !== 0) {
+    console.log(scrub(push.stderr, secrets()))
+    return done('publish_failed', `The push to \`${branch}\` was rejected, ${nothing}. When the branch moved while the agent worked, ask again. [Run log](${runUrl})`)
+  }
   const sha = git('rev-parse', 'HEAD')
   writeFileSync(runFile(`diff-${round}.patch`), git('diff', baseSha, 'HEAD') + '\n')
 
-  if (prev) return done('pr_opened', body, { sha })
+  if (onto) return done('pr_updated', body, { sha })
   writeFileSync(runFile('pr-body.md'), body)
   const prUrl = sh('gh', ['pr', 'create', '--repo', repo, '--base', plan.baseBranch, '--head', branch, '--title', plan.issue.title, '--body-file', runFile('pr-body.md')], { env: { ...process.env, GH_TOKEN: token } })
   done('pr_opened', `Opened ${prUrl}`, { branch, prUrl, sha })
@@ -312,7 +366,7 @@ function publishChange(plan: Plan, round: number) {
 
 function review(round: number) {
   const plan = readPlan()
-  if (plan.kind !== 'implement' || !published(round)?.sha) return console.log(`review ${round}: round ${round} pushed nothing to review`)
+  if (plan.kind === 'spec' || !published(round)?.sha) return console.log(`review ${round}: round ${round} pushed nothing to review`)
   const input = runFile(`review-${round}-input`)
   const tree = runFile(`review-${round}-tree`)
   for (const dir of [input, tree]) {
@@ -321,6 +375,7 @@ function review(round: number) {
   }
   writeFileSync(join(input, 'issue.md'), `# Issue #${plan.issue.number}: ${plan.issue.title}\n\n${plan.issue.body}\n`)
   if (plan.spec) writeFileSync(join(input, 'plan.md'), `${plan.spec}\n`)
+  if (plan.kind === 'revise') writeFileSync(join(input, 'feedback.md'), `${scrub(feedbackSection(plan.feedback), secrets())}\n`)
   copyFileSync(runFile(`diff-${round}.patch`), join(input, 'diff.patch'))
   // The published tree without .git, whose remote URL holds the GitHub token. The review's edits land in this copy and are dropped.
   sh('rsync', ['-a', '--exclude=.git', `${runFile('pub')}/`, `${tree}/`])
@@ -354,16 +409,18 @@ function record() {
     return { ...s, transcript: text ? 'stored' : 'withheld' }
   })
 
-  const main = results.find((s) => s.agent === plan.kind && s.round === 0)
-  const def = loadAgent(agentsDir, plan.kind)
-  const harness = main?.harness ?? (plan.kind === 'implement' ? plan.harness : null) ?? def.defaultHarness
+  const mainAgent = MAIN_AGENT[plan.kind]
+  const main = results.find((s) => s.agent === mainAgent && s.round === 0)
+  const def = loadAgent(agentsDir, mainAgent)
+  const harness = main?.harness ?? (mainAgent === 'implement' ? plan.harness : null) ?? def.defaultHarness
   const opened = published(0)
+  const pr = plan.kind === 'revise' ? plan.pr : null
   const total = (pick: (s: StageRun) => number) => stages.reduce((n, s) => n + pick(s), 0)
   const costs = stages.map((s) => s.usage.costUsd).filter((c): c is number => c !== null)
   const rec: RunRecord = {
     id,
     startedAt: stages[0]?.startedAt ?? new Date().toISOString(),
-    trigger: `issue#${plan.issue.number}`,
+    trigger: pr ? `pr#${pr.number}` : `issue#${plan.issue.number}`,
     factorySha: sh('git', ['-C', factoryDir, 'rev-parse', 'HEAD']),
     kind: plan.kind,
     task: plan.task,
@@ -371,9 +428,9 @@ function record() {
     harness,
     model: main?.model ?? def.models[harness],
     repo: plan.issue.repo,
-    baseSha: main?.baseSha ?? '',
-    branch: opened?.branch ?? null,
-    prUrl: opened?.prUrl ?? null,
+    baseSha: main?.baseSha ?? pr?.baseSha ?? '',
+    branch: opened?.branch ?? pr?.branch ?? null,
+    prUrl: opened?.prUrl ?? pr?.url ?? null,
     status: opened?.status ?? (main?.ok ? 'publish_failed' : 'agent_failed'),
     verdict: stages.findLast((s) => s.agent === 'review')?.verdict ?? null,
     stages,
