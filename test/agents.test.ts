@@ -1,18 +1,48 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { loadAgent, parseAgent } from '../src/agents.ts'
+import { loadAgent, parseAgent, parseVerdict } from '../src/agents.ts'
+import type { AgentName } from '../src/types.ts'
 
-test('the shipped implement agent loads with a model for every harness', () => {
-  const agent = loadAgent(fileURLToPath(new URL('..', import.meta.url)), 'implement')
-  assert.equal(agent.defaultHarness, 'claude-code')
-  assert.deepEqual(Object.keys(agent.models).sort(), ['claude-code', 'pi'])
-  assert.match(agent.prompt, /Do not commit/)
+const factoryDir = fileURLToPath(new URL('..', import.meta.url))
+
+test('every shipped agent loads with a model for every harness', () => {
+  for (const name of ['spec', 'implement', 'review'] satisfies AgentName[]) {
+    const agent = loadAgent(factoryDir, name)
+    assert.equal(agent.defaultHarness, 'claude-code', name)
+    assert.deepEqual(Object.keys(agent.models).sort(), ['claude-code', 'pi'], name)
+  }
+  assert.match(loadAgent(factoryDir, 'implement').prompt, /Do not commit/)
+})
+
+test('the review prompt asks for the verdict line the factory parses', () => {
+  const prompt = loadAgent(factoryDir, 'review').prompt
+  assert.equal(parseVerdict(prompt.match(/`(VERDICT: approve)`/)![1]), 'approve')
+  assert.equal(parseVerdict(prompt.match(/`(VERDICT: request_changes)`/)![1]), 'request_changes')
 })
 
 test('a broken agent file fails with a message naming the problem', () => {
   const full = '---\nharness: pi\nclaude-code: sonnet\npi: deepseek/x\n---\nDo it.\n'
-  assert.throws(() => parseAgent('x', full.replace('harness: pi', 'harness: gemini')), /harness must be one of/)
-  assert.throws(() => parseAgent('x', full.replace('pi: deepseek/x\n', '')), /missing model for pi/)
-  assert.throws(() => parseAgent('x', 'Do it.'), /missing --- frontmatter/)
+  assert.throws(() => parseAgent('spec', full.replace('harness: pi', 'harness: gemini')), /harness must be one of/)
+  assert.throws(() => parseAgent('spec', full.replace('pi: deepseek/x\n', '')), /missing model for pi/)
+  assert.throws(() => parseAgent('spec', 'Do it.'), /missing --- frontmatter/)
+})
+
+const review = (findings: string, last: string) => `The change resolves the issue.\n\n${findings}\n\n${last}`
+
+test('a review ending in a verdict line yields that verdict', () => {
+  assert.equal(parseVerdict(review('No blocking findings.', 'VERDICT: approve')), 'approve')
+  assert.equal(parseVerdict(review('1. `src/export.ts:42` drops the last row. Blocking.', 'VERDICT: request_changes')), 'request_changes')
+  assert.equal(parseVerdict(review('No blocking findings.', '**VERDICT: approve**\n')), 'approve')
+})
+
+test('the last VERDICT line decides, even over an earlier valid one', () => {
+  assert.equal(parseVerdict('I almost wrote VERDICT: approve but\nVERDICT: approve\nthen tests failed.\nVERDICT: request_changes'), 'request_changes')
+  assert.equal(parseVerdict('VERDICT: approve\nOn reflection:\nVERDICT: lgtm'), null)
+})
+
+test('a review without a readable verdict has none', () => {
+  assert.equal(parseVerdict(''), null)
+  assert.equal(parseVerdict(review('Looks fine.', 'Overall I approve.')), null)
+  assert.equal(parseVerdict(review('Looks fine.', 'VERDICT: Approve')), null)
 })

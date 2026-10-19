@@ -1,8 +1,10 @@
-import type { HarnessName, Step, Transcript } from './types.ts'
+import type { Billing, HarnessName, Step, Transcript } from './types.ts'
+
+export type Credential = { env: string; billing: Billing }
 
 type Harness = {
-  // Environment variables the harness reads its API key from. Only these enter the container.
-  keyEnv: string[]
+  // The environment variables the harness can authenticate with, most preferred first.
+  credentials: Credential[]
   command(model: string, prompt: string): string[]
   parse(jsonl: string): Transcript
   steps(jsonl: string): Step[]
@@ -40,7 +42,10 @@ const failed: Transcript = {
 
 export const harnesses: Record<HarnessName, Harness> = {
   'claude-code': {
-    keyEnv: ['ANTHROPIC_API_KEY'],
+    credentials: [
+      { env: 'CLAUDE_CODE_OAUTH_TOKEN', billing: 'subscription' },
+      { env: 'ANTHROPIC_API_KEY', billing: 'api' },
+    ],
     command: (model, prompt) => [
       'claude', '-p', prompt,
       '--output-format', 'stream-json', '--verbose',
@@ -77,7 +82,7 @@ export const harnesses: Record<HarnessName, Harness> = {
   },
 
   pi: {
-    keyEnv: ['DEEPSEEK_API_KEY'],
+    credentials: [{ env: 'DEEPSEEK_API_KEY', billing: 'api' }],
     command: (model, prompt) => ['pi', '-p', '--mode', 'json', '--no-session', '--model', model, '--', prompt],
     parse(jsonl) {
       const end = events(jsonl).findLast((e) => e.type === 'agent_end')
@@ -114,4 +119,9 @@ export const harnesses: Record<HarnessName, Harness> = {
         })
     },
   },
+}
+
+// The one credential a container gets: the most preferred one that is set.
+export function credential(harness: HarnessName, env: Record<string, string | undefined>): Credential | null {
+  return harnesses[harness].credentials.find((c) => env[c.env]) ?? null
 }

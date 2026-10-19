@@ -1,5 +1,5 @@
 # Copy to .github/workflows/factory.yml in any repo the factory should work on.
-# Then add the FACTORY_GH_TOKEN secret and at least one model key to that repo.
+# Then add the FACTORY_GH_TOKEN secret and at least one model credential to that repo.
 name: factory
 
 on:
@@ -8,10 +8,11 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
   factory:
-    if: github.event.label.name == 'factory'
+    if: github.event.label.name == 'factory' || github.event.label.name == 'factory:spec'
     uses: kenryu42/factory/.github/workflows/run.yml@main
     # Runs on GitHub-hosted runners. To run on your own Mac instead, uncomment the two lines below,
     # but only in repos where you alone can open pull requests.

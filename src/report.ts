@@ -78,12 +78,13 @@ function clipStep(s: Step): Step {
 export type ReportModel = {
   generatedAt: string
   rows: ReportRow[]
-  // null when the transcript was withheld or is missing.
-  steps: Record<string, Step[] | null>
+  // Run id -> stage (`<agent>-<round>`) -> steps. null when the transcript was withheld or is missing.
+  steps: Record<string, Record<string, Step[] | null>>
 }
 
 export function renderReport(model: ReportModel): string {
-  const steps = Object.fromEntries(Object.entries(model.steps).map(([id, s]) => [id, s && s.map(clipStep)]))
+  const steps = Object.fromEntries(Object.entries(model.steps).map(([id, stages]) =>
+    [id, Object.fromEntries(Object.entries(stages).map(([stage, s]) => [stage, s && s.map(clipStep)]))]))
   const data = { ...model, steps, summary: summarize(model.rows) }
   // `<` escaped so no string in the data, such as `</script>` in a transcript, can end the script element.
   const json = JSON.stringify(data).replace(/</g, '\\u003c')

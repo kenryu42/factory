@@ -1,17 +1,29 @@
 # factory
 
-A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code or Pi) works on it in a container and opens a pull request. Every run leaves a record with its cost, tokens, and scrubbed transcript in a private repo.
+A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code or Pi) works on it in a container and opens a pull request, a review agent reviews it, and the coding agent gets one round to fix what the review found. Label an issue `factory:spec` first to get a plan you can edit before any code is written. Every run leaves a record with its cost, tokens, and scrubbed transcripts in a private repo.
 
 ## How a run works
 
-`examples/factory.yml` in a target repo calls `.github/workflows/run.yml` in this repo. That workflow runs `src/cli.ts` one step at a time:
+`examples/factory.yml` in a target repo calls `.github/workflows/run.yml` in this repo. That workflow runs `src/cli.ts` one step at a time. Each step after `guard` reads what earlier steps left in the run directory and does nothing when its stage does not apply.
 
-1. `guard` reads the issue event. It starts a run only when the repo owner added the `factory` label to an issue the owner wrote.
-2. `agent` runs the harness inside the `docker/` image on a checkout of the target repo. The container gets one model key and no GitHub token.
-3. `publish` copies the agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
-4. `record` scrubs the transcript, checks it with gitleaks, and pushes `runs/<id>.json` and `transcripts/<id>.jsonl` to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
+1. `guard` reads the issue event. It starts a run only when the repo owner added `factory` or `factory:spec` to an issue the owner wrote. For `factory`, it also looks for the owner's latest spec comment on the issue and takes it as the approved plan.
+2. `agent 0` runs an agent inside the `docker/` image on a checkout of the target repo. The container gets one model credential and no GitHub token. For `factory:spec` it runs the spec agent on a read-only checkout; for `factory` it runs the implement agent with the issue and the approved plan.
+3. `publish 0` posts the spec agent's plan as an issue comment, or copies the implement agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
+4. `review 0` runs the review agent on a copy of the published tree, with the issue, the plan, and the diff mounted read-only. It ends with `VERDICT: approve` or `VERDICT: request_changes`. `respond 0` posts the review on the pull request.
+5. When the review asks for changes, `agent 1` runs the implement agent again in the same work tree with the review in its prompt, `publish 1` pushes one more commit to the pull request, and `review 1` and `respond 1` review it. There is never a second revise round.
+6. `record` scrubs each transcript, checks it with gitleaks, and pushes `runs/<id>.json` and `transcripts/<id>/<agent>-<round>.jsonl` to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
 
-`agents/implement.md` defines the agent: its prompt, the default harness, and the model for each harness. To pick a harness for one issue, add a `harness:claude-code` or `harness:pi` label before you add `factory`.
+Every comment the factory posts is scrubbed of known secrets and checked with gitleaks first.
+
+`agents/spec.md`, `agents/implement.md`, and `agents/review.md` define the agents: each one's prompt, default harness, and model for each harness. To pick the implement harness for one issue, add a `harness:claude-code` or `harness:pi` label before you add `factory`. The spec and review agents always use their own default, so reviews stay comparable across harnesses.
+
+### Plan first
+
+1. Add `factory:spec` to an issue. The spec agent posts a plan as a comment.
+2. Edit that comment until the plan is what you want. Only your own comments count, so nobody else can plant a plan.
+3. Add `factory`. The implement agent follows the plan, and the review agent checks the change against it.
+
+To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`.
 
 ## Set up a target repo
 
@@ -20,16 +32,17 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 
 	```sh
 	gh secret set FACTORY_GH_TOKEN -R <owner>/<repo>
-	gh secret set ANTHROPIC_API_KEY -R <owner>/<repo>   # claude-code
-	gh secret set DEEPSEEK_API_KEY -R <owner>/<repo>    # pi
+	gh secret set CLAUDE_CODE_OAUTH_TOKEN -R <owner>/<repo>   # claude-code on your Claude subscription
+	gh secret set ANTHROPIC_API_KEY -R <owner>/<repo>         # claude-code on API billing
+	gh secret set DEEPSEEK_API_KEY -R <owner>/<repo>          # pi
 	```
 
-	Use keys made only for the factory, each with a hard spend limit. Never use a subscription login.
+	`CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` and bills your Claude plan's usage. When it is set, the factory uses it instead of `ANTHROPIC_API_KEY` and records each stage's billing as `subscription`. Use API keys made only for the factory, each with a hard spend limit.
 3. Copy `examples/factory.yml` to `.github/workflows/factory.yml` in the target repo.
 
 	The example runs on GitHub-hosted `ubuntu-latest`. To run on your own Mac, uncomment its `with:` block, which selects a self-hosted runner labeled `factory`. Do that only in repos where you alone can open pull requests, as GitHub's [security guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use) explains. The Mac needs Docker, git, and gh on the runner's PATH.
 4. In the target repo settings under **Actions**, set workflow permissions to read-only and require approval for workflows from all outside contributors.
-5. Create the labels `factory`, `harness:claude-code`, and `harness:pi`.
+5. Create the labels `factory`, `factory:spec`, `harness:claude-code`, and `harness:pi`.
 
 ## Query your runs
 
@@ -41,7 +54,7 @@ node src/cli.ts report ../factory-runs
 open ../factory-runs/report.html
 ```
 
-`report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by harness and status. Click a run to read its transcript as messages, tool calls, and tool results.
+`report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by kind, harness, and status. Click a run to see its stages and their review verdicts, and click a stage to read its transcript as messages, tool calls, and tool results.
 
 The report asks GitHub for each PR's state through your `gh` login. A PR counts as reverted when a merged PR in the same repo says `Reverts <repo>#<number>`, which is what GitHub's Revert button writes. Human touches are the comments, reviews, and commits on the PR by the repo owner. Bots and the factory's own commits do not count. If `gh` cannot look up a PR, the report prints a warning and leaves that run's outcome blank.
 
@@ -50,6 +63,7 @@ For your own queries, build a SQLite database from the run files:
 ```sh
 node src/cli.ts db ../factory-runs
 sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) from runs group by harness'
+sqlite3 ../factory-runs/runs.sqlite 'select agent, verdict, count(*) from stages where agent = "review" group by verdict'
 ```
 
 Both commands write generated files into the `factory-runs` checkout. Do not commit `report.html` or `runs.sqlite`; add them to that repo's `.gitignore`.

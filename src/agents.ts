@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { HARNESS_NAMES, isHarnessName, type Agent } from './types.ts'
+import { HARNESS_NAMES, isHarnessName, type Agent, type AgentName, type Verdict } from './types.ts'
 
 // Agent files are markdown with flat `key: value` frontmatter:
 //   harness: <default harness>
 //   claude-code: <model>   pi: <model>
-export function parseAgent(name: string, text: string): Agent {
+export function parseAgent(name: AgentName, text: string): Agent {
   const match = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
   if (!match) throw new Error(`agents/${name}.md: missing --- frontmatter ---`)
   const fields = new Map<string, string>()
@@ -34,6 +34,17 @@ export function parseAgent(name: string, text: string): Agent {
   return { name, defaultHarness, models, prompt }
 }
 
-export function loadAgent(factoryDir: string, name: string): Agent {
+export function loadAgent(factoryDir: string, name: AgentName): Agent {
   return parseAgent(name, readFileSync(join(factoryDir, 'agents', `${name}.md`), 'utf8'))
+}
+
+// The review agent ends with `VERDICT: approve` or `VERDICT: request_changes`. The last VERDICT line decides,
+// so a verdict quoted earlier in the review never counts. Markdown emphasis around the line is tolerated.
+export function parseVerdict(text: string): Verdict | null {
+  const line = text
+    .split('\n')
+    .map((l) => l.trim().replace(/^[*`]+|[*`]+$/g, '').trim())
+    .findLast((l) => l.startsWith('VERDICT:'))
+  const value = line?.slice('VERDICT:'.length).trim()
+  return value === 'approve' || value === 'request_changes' ? value : null
 }

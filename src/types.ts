@@ -5,8 +5,10 @@ export function isHarnessName(value: string): value is HarnessName {
   return (HARNESS_NAMES as readonly string[]).includes(value)
 }
 
+export type AgentName = 'spec' | 'implement' | 'review'
+
 export type Agent = {
-  name: string
+  name: AgentName
   defaultHarness: HarnessName
   models: Record<HarnessName, string>
   prompt: string
@@ -19,12 +21,20 @@ export type Issue = {
   body: string
 }
 
+// A `factory:spec` label asks for a plan, a `factory` label for a pull request.
+export type RunKind = 'spec' | 'implement'
+
 export type Plan = {
   runId: string
+  kind: RunKind
   issue: Issue
   baseBranch: string
-  // From a harness:<name> label. null means the agent's default.
+  // From a harness:<name> label. It picks the implement harness only. null means the agent's default.
   harness: HarnessName | null
+  // The plan in the owner's latest spec comment on the issue, which the owner may have edited.
+  spec: string | null
+  // Benchmark task id from a `<!-- bench:<id> -->` marker in the issue body.
+  task: string | null
 }
 
 export type Usage = {
@@ -44,21 +54,38 @@ export type Transcript = {
   usage: Usage
 }
 
-export type AgentResult = Transcript & {
-  agent: string
+export type Billing = 'subscription' | 'api'
+
+export type Verdict = 'approve' | 'request_changes'
+
+// One agent invocation. Round 0 is the first pass; round 1 is the revise round after a review asks for changes.
+export type StageRun = {
+  agent: AgentName
+  round: number
   harness: HarnessName
   model: string
-  baseSha: string
+  billing: Billing
+  ok: boolean
+  // Review stages only. null when the review ended without a readable verdict.
+  verdict: Verdict | null
+  usage: Usage
   startedAt: string
   wallTimeS: number
+  transcript: 'stored' | 'withheld'
 }
 
-export type RunStatus = 'pr_opened' | 'no_changes' | 'agent_failed' | 'publish_failed' | 'blocked_secret' | 'blocked_workflow_change'
+// What a stage leaves in FACTORY_RUN_DIR for the steps after it.
+export type StageResult = Omit<StageRun, 'transcript'> & { finalText: string; baseSha: string }
+
+export type RunStatus =
+  | 'pr_opened' | 'spec_posted' | 'no_changes' | 'agent_failed' | 'publish_failed' | 'blocked_secret' | 'blocked_workflow_change'
 
 export type PublishResult = {
   status: RunStatus
   branch: string | null
   prUrl: string | null
+  // The commit this round pushed to the PR branch. null when it pushed nothing.
+  sha: string | null
 }
 
 export type RunRecord = {
@@ -66,7 +93,10 @@ export type RunRecord = {
   startedAt: string
   trigger: string
   factorySha: string
-  agent: string
+  kind: RunKind
+  task: string | null
+  issueNumber: number
+  // The harness and model of the run's main agent: implement, or spec for a spec run.
   harness: HarnessName
   model: string
   repo: string
@@ -74,12 +104,15 @@ export type RunRecord = {
   branch: string | null
   prUrl: string | null
   status: RunStatus
+  // The last review's verdict.
+  verdict: Verdict | null
+  stages: StageRun[]
+  // Totals over stages. costUsd is null only when no stage reported a price.
   inputTokens: number
   cacheReadTokens: number
   outputTokens: number
   costUsd: number | null
   wallTimeS: number
-  transcript: 'stored' | 'withheld'
   runUrl: string
 }
 

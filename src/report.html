@@ -66,12 +66,14 @@
   .runs tbody tr { cursor: pointer; }
   .runs tbody tr:hover { background: var(--code); }
   .runs tbody tr:last-child td { border-bottom: 0; }
+  .runs tbody tr.selected { background: var(--code); }
+  .stages { margin-bottom: 16px; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
-  .s-pr_opened, .o-open { color: var(--ok); }
+  .s-pr_opened, .s-spec_posted, .o-open, .v-approve { color: var(--ok); }
   .s-no_changes, .o-closed { color: var(--muted); }
   .s-agent_failed, .s-publish_failed, .o-reverted { color: var(--bad); }
-  .s-blocked_secret, .s-blocked_workflow_change { color: var(--warn); }
+  .s-blocked_secret, .s-blocked_workflow_change, .v-request_changes { color: var(--warn); }
   .o-merged { color: var(--merged); }
   .back { display: inline-block; margin-bottom: 12px; }
   .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 16px; margin-bottom: 16px; }
@@ -97,7 +99,7 @@
   const data = JSON.parse(document.getElementById('report-data').textContent)
   const rows = data.rows.slice().sort((a, b) => b.startedAt.localeCompare(a.startedAt))
   const app = document.getElementById('app')
-  const filters = { harness: '', status: '' }
+  const filters = { kind: '', harness: '', status: '' }
 
   function h(tag, attrs, ...children) {
     const el = document.createElement(tag)
@@ -117,6 +119,9 @@
   const issueNumber = (r) => (r.trigger.match(/^issue#(\d+)$/) || [])[1]
   const prNumber = (url) => (url ? '#' + url.split('/').pop() : '')
   const pill = (cls, text) => h('span', { class: 'pill ' + cls }, text)
+  const verdict = (v) => (v ? pill('v-' + v, label(v)) : h('span', { class: 'muted' }, 'none'))
+  const stageKey = (s) => `${s.agent}-${s.round}`
+  const stageHref = (r, s) => '#run=' + encodeURIComponent(r.id) + '&stage=' + encodeURIComponent(stageKey(s))
 
   function issueLink(r) {
     const n = issueNumber(r)
@@ -164,19 +169,21 @@
   const count = h('span', { class: 'muted' })
 
   function renderTable() {
-    const shown = rows.filter((r) => (!filters.harness || r.harness === filters.harness) && (!filters.status || r.status === filters.status))
+    const shown = rows.filter((r) => Object.entries(filters).every(([k, v]) => !v || r[k] === v))
     count.textContent = `${shown.length} of ${rows.length} runs`
     tbody.replaceChildren(...(shown.length ? shown.map((r) => h('tr', { onclick: () => { location.hash = 'run=' + encodeURIComponent(r.id) } },
       h('td', { style: 'font-variant-numeric:tabular-nums' }, date(r.startedAt)),
       h('td', {}, issueLink(r)),
+      h('td', {}, r.kind),
       h('td', {}, r.harness),
       h('td', { class: 'muted' }, r.model),
       h('td', {}, pill('s-' + r.status, label(r.status))),
+      h('td', {}, r.kind === 'implement' ? verdict(r.verdict) : ''),
       h('td', {}, r.outcome ? pill('o-' + r.outcome, r.outcome) : h('span', { class: 'muted' }, r.prUrl ? 'unknown' : '')),
       h('td', { class: 'num' }, r.humanTouches === null ? '' : String(r.humanTouches)),
       h('td', { class: 'num' }, usd(r.costUsd)),
       h('td', { class: 'num' }, dur(r.wallTimeS)),
-      h('td', {}, r.prUrl ? link(r.prUrl, prNumber(r.prUrl)) : ''))) : [h('tr', {}, h('td', { colspan: 10, class: 'empty' }, 'No runs match these filters.'))]))
+      h('td', {}, r.prUrl ? link(r.prUrl, prNumber(r.prUrl)) : ''))) : [h('tr', {}, h('td', { colspan: 12, class: 'empty' }, 'No runs match these filters.'))]))
   }
 
   function listView() {
@@ -184,9 +191,9 @@
     renderTable()
     return [
       ...summaryView(),
-      h('div', { class: 'filters' }, select('harness', uniq('harness'), 'All harnesses'), select('status', uniq('status'), 'All statuses'), count),
+      h('div', { class: 'filters' }, select('kind', uniq('kind'), 'All kinds'), select('harness', uniq('harness'), 'All harnesses'), select('status', uniq('status'), 'All statuses'), count),
       h('div', { class: 'table-wrap' }, h('table', { class: 'runs' },
-        h('thead', {}, h('tr', {}, ['Started', 'Issue', 'Harness', 'Model', 'Status', 'Outcome', 'Touches', 'Cost', 'Wall time', 'PR']
+        h('thead', {}, h('tr', {}, ['Started', 'Issue', 'Kind', 'Harness', 'Model', 'Status', 'Verdict', 'Outcome', 'Touches', 'Cost', 'Wall time', 'PR']
           .map((t) => h('th', { class: ['Touches', 'Cost', 'Wall time'].includes(t) ? 'num' : null }, t)))),
         tbody)),
     ]
@@ -212,11 +219,37 @@
     return h('div', { class: 'step result' + (s.isError ? ' error' : '') }, h('div', { class: 'kind' }, s.isError ? 'Error' : 'Result'), clamped(s.output || '(no output)'))
   }
 
-  function runView(id) {
+  function stagesView(r, selected) {
+    const head = ['Stage', 'Harness', 'Model', 'Billing', 'Result', 'Verdict', 'Cost', 'Wall time', 'Transcript']
+    return h('div', { class: 'table-wrap stages' }, h('table', { class: 'runs' },
+      h('thead', {}, h('tr', {}, head.map((t) => h('th', { class: ['Cost', 'Wall time'].includes(t) ? 'num' : null }, t)))),
+      h('tbody', {}, r.stages.map((s) => h('tr', { class: stageKey(s) === selected ? 'selected' : null, onclick: () => { location.hash = stageHref(r, s).slice(1) } },
+        h('td', {}, `${s.agent} · round ${s.round}`),
+        h('td', {}, s.harness),
+        h('td', { class: 'muted' }, s.model),
+        h('td', {}, s.billing),
+        h('td', {}, s.ok ? 'ok' : pill('s-agent_failed', 'failed')),
+        h('td', {}, s.agent === 'review' ? verdict(s.verdict) : ''),
+        h('td', { class: 'num' }, usd(s.usage.costUsd)),
+        h('td', { class: 'num' }, dur(s.wallTimeS)),
+        h('td', {}, s.transcript === 'stored' ? 'stored' : h('span', { class: 'muted' }, 'withheld')))))))
+  }
+
+  function transcriptView(r, stage) {
+    if (!stage) return [h('div', { class: 'panel notice' }, 'This run has no stages.')]
+    const steps = (data.steps[r.id] || {})[stageKey(stage)]
+    const title = h('h2', {}, `${stage.agent} · round ${stage.round} transcript`)
+    if (steps) return [title, h('div', { class: 'steps' }, steps.length ? steps.map(stepView) : h('div', { class: 'panel notice' }, 'The transcript has no messages or tool calls.'))]
+    return [title, h('div', { class: 'panel notice' }, stage.transcript === 'withheld'
+      ? 'The transcript was withheld because it still looked like it held a secret after scrubbing.'
+      : 'The transcript file is missing from this checkout.')]
+  }
+
+  function runView(id, key) {
     const r = rows.find((x) => x.id === id)
     const back = h('a', { class: 'back', href: '#' }, '← All runs')
     if (!r) return [back, h('div', { class: 'panel notice' }, `No run with id ${id}.`)]
-    const steps = data.steps[id]
+    const stage = r.stages.find((s) => stageKey(s) === key) || r.stages[0]
     const field = (name, value) => h('div', {}, h('span', { class: 'label' }, name), value)
     return [
       back,
@@ -224,8 +257,10 @@
         h('h1', { style: 'margin-bottom:12px' }, issueLink(r), h('span', { class: 'muted', style: 'font-weight:400' }, `  run ${r.id}`)),
         h('div', { class: 'meta' },
           field('Started', date(r.startedAt)),
+          field('Kind', r.task ? `${r.kind} · task ${r.task}` : r.kind),
           field('Harness', `${r.harness} (${r.model})`),
           field('Status', pill('s-' + r.status, label(r.status))),
+          field('Final verdict', r.kind === 'implement' ? verdict(r.verdict) : 'n/a'),
           field('Outcome', r.outcome ? pill('o-' + r.outcome, r.outcome) : r.prUrl ? 'unknown' : 'no PR'),
           field('Human touches', r.humanTouches === null ? 'n/a' : String(r.humanTouches)),
           field('Cost', usd(r.costUsd)),
@@ -233,19 +268,17 @@
           field('Wall time', dur(r.wallTimeS)),
           field('Pull request', r.prUrl ? link(r.prUrl, prNumber(r.prUrl)) : 'none'),
           field('Run log', link(r.runUrl, /^https:\/\//.test(r.runUrl) ? 'GitHub Actions' : r.runUrl)))),
-      steps
-        ? h('div', { class: 'steps' }, steps.length ? steps.map(stepView) : h('div', { class: 'panel notice' }, 'The transcript has no messages or tool calls.'))
-        : h('div', { class: 'panel notice' }, r.transcript === 'withheld'
-          ? 'The transcript was withheld because it still looked like it held a secret after scrubbing.'
-          : 'The transcript file is missing from this checkout.'),
+      stagesView(r, stage && stageKey(stage)),
+      ...transcriptView(r, stage),
     ]
   }
 
   function route() {
-    const m = location.hash.match(/^#run=(.+)$/)
+    const params = new URLSearchParams(location.hash.slice(1))
+    const id = params.get('run')
     app.replaceChildren(
       h('header', {}, h('h1', {}, 'Factory runs'), h('span', { class: 'muted' }, `Generated ${date(data.generatedAt)} UTC`)),
-      ...(m ? runView(decodeURIComponent(m[1])) : listView()))
+      ...(id ? runView(id, params.get('stage')) : listView()))
     window.scrollTo(0, 0)
   }
 

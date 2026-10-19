@@ -1,5 +1,8 @@
 # Called from a target repo's factory.yml (see examples/factory.yml).
-# Each step gets only the secrets it needs. The agent runs in a container that sees one model key and nothing else.
+# Each step gets only the secrets it needs: steps that run an agent get model credentials, steps that talk to GitHub
+# get FACTORY_GH_TOKEN (plus the model credentials, only to scrub them from what they post). An agent runs in a
+# container that sees one model credential and nothing else. Every cli step after guard does nothing when its
+# stage does not apply to the run, so the step list is the whole pipeline for both labels.
 name: factory run
 
 on:
@@ -10,17 +13,19 @@ on:
         type: string
         default: '"ubuntu-latest"'
     secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: { required: false }
       ANTHROPIC_API_KEY: { required: false }
       DEEPSEEK_API_KEY: { required: false }
       FACTORY_GH_TOKEN: { required: true }
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
   run:
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 60
+    timeout-minutes: 240
     concurrency:
       group: factory-${{ github.repository }}-${{ github.event.issue.number }}
     env:
@@ -41,6 +46,8 @@ jobs:
         run: |
           echo "FACTORY_RUN_DIR=$RUNNER_TEMP/factory-run" >> "$GITHUB_ENV"
           FACTORY_RUN_DIR="$RUNNER_TEMP/factory-run" node factory/src/cli.ts guard
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v7
@@ -69,16 +76,69 @@ jobs:
 
       - if: steps.guard.outputs.run == 'true'
         name: Agent
-        run: node factory/src/cli.ts agent
+        run: node factory/src/cli.ts agent 0
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
       - if: always() && steps.guard.outputs.run == 'true'
         name: Publish
-        run: node factory/src/cli.ts publish
+        run: node factory/src/cli.ts publish 0
         env:
           FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Review
+        run: node factory/src/cli.ts review 0
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Respond
+        run: node factory/src/cli.ts respond 0
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Revise
+        run: node factory/src/cli.ts agent 1
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: always() && steps.guard.outputs.run == 'true'
+        name: Publish revision
+        run: node factory/src/cli.ts publish 1
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Review revision
+        run: node factory/src/cli.ts review 1
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Respond to revision
+        run: node factory/src/cli.ts respond 1
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
@@ -87,5 +147,6 @@ jobs:
         run: node factory/src/cli.ts record
         env:
           FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

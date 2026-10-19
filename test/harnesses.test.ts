@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { harnesses } from '../src/harnesses.ts'
+import { credential, harnesses } from '../src/harnesses.ts'
 
 // Fixtures are real headless runs of each CLI fixing `add()` in math.js.
 // Expected numbers were read out of the fixtures with jq, not computed by the parser.
@@ -73,4 +73,17 @@ test('steps hold readable text, never raw events or thinking', () => {
     }
     assert.ok(!steps.some((s) => s.kind === 'message' && /^The bug is obvious/.test(s.text)), `${name} leaks thinking`)
   }
+})
+
+test('claude-code prefers the subscription token and passes only one credential', () => {
+  const both = { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x', ANTHROPIC_API_KEY: 'sk-ant-api03-x', PATH: '/usr/bin' }
+  assert.deepEqual(credential('claude-code', both), { env: 'CLAUDE_CODE_OAUTH_TOKEN', billing: 'subscription' })
+  assert.deepEqual(credential('claude-code', { ANTHROPIC_API_KEY: 'sk-ant-api03-x', CLAUDE_CODE_OAUTH_TOKEN: '' }), { env: 'ANTHROPIC_API_KEY', billing: 'api' })
+  assert.equal(credential('claude-code', { DEEPSEEK_API_KEY: 'sk-x' }), null)
+})
+
+test('pi always bills the API key', () => {
+  const all = { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x', ANTHROPIC_API_KEY: 'sk-ant-api03-x', DEEPSEEK_API_KEY: 'sk-x' }
+  assert.deepEqual(credential('pi', all), { env: 'DEEPSEEK_API_KEY', billing: 'api' })
+  assert.equal(credential('pi', { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x' }), null)
 })
