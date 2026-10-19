@@ -2,20 +2,26 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { HARNESS_NAMES, isHarnessName, type Agent, type Verdict } from './types.ts'
 
-// Agent files (agents/*.md) and judge files (scorers/*.md) are markdown with flat `key: value` frontmatter:
-//   harness: <default harness>
-//   claude-code: <model>   pi: <model>
-export function parseAgent(name: string, text: string): Agent {
+// Flat `key: value` frontmatter between --- lines, as agent, judge and bench task files use. `file` names the file in errors.
+export function parseFrontmatter(file: string, text: string): { fields: Map<string, string>; body: string } {
   const match = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
-  if (!match) throw new Error(`${name}.md: missing --- frontmatter ---`)
+  if (!match) throw new Error(`${file}: missing --- frontmatter ---`)
   const fields = new Map<string, string>()
   for (const raw of match[1].split('\n')) {
     const line = raw.replace(/\s+#.*$/, '').trim()
     if (!line) continue
     const colon = line.indexOf(':')
-    if (colon < 1) throw new Error(`${name}.md: bad frontmatter line "${raw}"`)
+    if (colon < 1) throw new Error(`${file}: bad frontmatter line "${raw}"`)
     fields.set(line.slice(0, colon).trim(), line.slice(colon + 1).trim())
   }
+  return { fields, body: match[2] }
+}
+
+// Agent files (agents/*.md) and judge files (scorers/*.md) are markdown with frontmatter:
+//   harness: <default harness>
+//   claude-code: <model>   pi: <model>
+export function parseAgent(name: string, text: string): Agent {
+  const { fields, body } = parseFrontmatter(`${name}.md`, text)
 
   const defaultHarness = fields.get('harness') ?? ''
   if (!isHarnessName(defaultHarness)) {
@@ -29,7 +35,7 @@ export function parseAgent(name: string, text: string): Agent {
     }),
   ) as Agent['models']
 
-  const prompt = match[2].trim()
+  const prompt = body.trim()
   if (!prompt) throw new Error(`${name}.md: prompt is empty`)
   return { name, defaultHarness, models, prompt }
 }

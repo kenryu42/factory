@@ -1,5 +1,5 @@
 import { benchSummary, calibration, passRate, scoreSummary } from './report.ts'
-import { benchSubject, CHECK_FILE, CORRECTNESS, fenced, scoredRun } from './score.ts'
+import { benchSubject, CORRECTNESS, fenced, scoredRun } from './score.ts'
 import { HARNESS_NAMES, type BenchResult, type Improvement, type RunRecord, type Score, type ScoreSubject } from './types.ts'
 
 // What the improve agent learns from: everything in factory-runs, plus the final text of each run's last review.
@@ -31,10 +31,11 @@ const capped = <T>(items: T[], show: (item: T) => string) =>
 // What a check's output says about the change, without quoting the hidden check, whose test names and assertions
 // would let the agent tune the factory to the benchmark: how many of its tests failed, and which of the repo's own
 // test files failed. The output is the tail of the test run, so the first failure's file can be missing.
-export function checkSummary(output: string): string {
+export function checkSummary(output: string, checks: string[]): string {
   const files = [...output.matchAll(/^test at (.+?):\d+:\d+$/gm)].map((m) => m[1])
-  const hidden = files.filter((f) => f.endsWith(CHECK_FILE)).length
-  const own = [...new Set(files.filter((f) => !f.endsWith(CHECK_FILE)))]
+  const isCheck = (f: string) => checks.some((c) => f.endsWith(c))
+  const hidden = files.filter(isCheck).length
+  const own = [...new Set(files.filter((f) => !isCheck(f)))]
   const parts = [
     hidden && `${hidden} test${hidden === 1 ? '' : 's'} of the hidden check failed`,
     own.length && `the repo's own tests failed in ${own.map((f) => `\`${f}\``).join(', ')}`,
@@ -114,14 +115,14 @@ export function findingsMarkdown(e: Evidence): string {
     sections.push(`## The review approved a change that failed correctness (${missed.length})\n\n${capped(missed, (r) => {
       const review = e.reviews[r.id]
       const check = e.scores.find((s) => scoredRun(s) === r.id && s.scorer === CORRECTNESS)!
-      return `- ${runLine(r.id)}\n  Check: ${checkSummary(check.reason)}.\n  The last review's final text:\n\n${review ? fenced(clip(review.trim(), MAX_REVIEW)) : '(transcript not stored)'}`
+      return `- ${runLine(r.id)}\n  Check: ${checkSummary(check.reason, check.check ?? [])}.\n  The last review's final text:\n\n${review ? fenced(clip(review.trim(), MAX_REVIEW)) : '(transcript not stored)'}`
     })}`)
   }
 
   const failing = Map.groupBy(e.scores.filter((s) => s.pass === false), (s) => s.scorer)
   for (const [scorer, fails] of [...failing].sort(([a], [b]) => Number(b === CORRECTNESS) - Number(a === CORRECTNESS) || a.localeCompare(b))) {
     sections.push(`## Failing ${scorer} scores (${fails.length})\n\n${capped(fails, (s) => scorer === CORRECTNESS
-      ? `- ${subjectLine(s.subject)}\n  Check: ${checkSummary(s.reason)}.`
+      ? `- ${subjectLine(s.subject)}\n  Check: ${checkSummary(s.reason, s.check ?? [])}.`
       : `- ${subjectLine(s.subject)}\n  The judge's reason:\n\n${fenced(clip(s.reason.trim(), MAX_REASON))}`)}`)
   }
 
@@ -129,7 +130,7 @@ export function findingsMarkdown(e: Evidence): string {
     const cells = e.bench.filter((c) => c.benchId === bench.benchId && c.pass === false)
     if (!cells.length) continue
     sections.push(`## Failing cells of benchmark ${bench.benchId} (${cells.length})\n\n${capped(cells, (c) =>
-      `- task \`${c.task}\` · ${c.harness}:${c.requestedModel} · ${usd(c.costUsd)}\n  Check: ${checkSummary(c.checkOutput)}.`)}`)
+      `- task \`${c.task}\` · ${c.harness}:${c.requestedModel} · ${usd(c.costUsd)}\n  Check: ${checkSummary(c.checkOutput, c.check ?? [])}.`)}`)
   }
 
   const text = sections.join('\n\n') + '\n'
@@ -137,7 +138,7 @@ export function findingsMarkdown(e: Evidence): string {
 }
 
 // The improve agent may change only the prompts of the agents it grades: never its own prompt, the judges (it could
-// relax them until runs pass), the code, the workflows, the bench tasks and their hidden checks, or the image.
+// relax them until runs pass), the code, the workflows, or the image.
 // A path counts only in its plain form, so `agents/../src/x` is out of scope.
 const IN_SCOPE = /^agents\/(?!improve\.md$)[A-Za-z0-9][A-Za-z0-9._-]*\.md$/
 

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { findingsMarkdown, patchProblems, type Evidence } from '../src/improve.ts'
+import { loadTask, tasksDirOf } from '../src/bench.ts'
 import { gradeTree } from '../src/score.ts'
 import type { BenchResult, Improvement, RunRecord, Score, StageRun } from '../src/types.ts'
 
@@ -17,7 +18,7 @@ const temp = (prefix: string) => {
 }
 after(() => temps.forEach((d) => rmSync(d, { recursive: true, force: true })))
 
-const checkPath = fileURLToPath(new URL('../bench/tasks/negative-money/check.test.js', import.meta.url))
+const tasksDir = tasksDirOf(fileURLToPath(new URL('./fixtures/sandbox', import.meta.url)))
 // A real record: pi resolved factory-sandbox#14 (bench task negative-money), and the review approved.
 const realRun = (over: Partial<RunRecord> = {}): RunRecord => ({ ...JSON.parse(readFileSync(new URL('./fixtures/run-negative-money.json', import.meta.url), 'utf8')), ...over })
 
@@ -31,7 +32,7 @@ const score = (runId: string, scorer: string, pass: boolean | null, reason = 're
 })
 
 const cell = (over: Partial<BenchResult>): BenchResult => ({
-  benchId: 'b1', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-v4-flash', model: 'deepseek-v4-flash', factoryRef: 'main',
+  benchId: 'b1', repo: 'kenryu42/factory-sandbox', task: 'negative-money', check: ['test/zz-bench-check.test.js'], harness: 'pi', requestedModel: 'deepseek/deepseek-v4-flash', model: 'deepseek-v4-flash', factoryRef: 'main',
   factorySha: 'f'.repeat(40), baseSha: 'b'.repeat(40), billing: 'api', pass: true, checkOutput: 'ℹ pass 9', usage: { inputTokens: 1, cacheReadTokens: 0, outputTokens: 1, costUsd: 0.02 },
   costUsd: 0.02, wallTimeS: 30, at: '2026-10-19T06:00:00Z', transcript: 'stored', diff: 'stored', ...over,
 })
@@ -44,7 +45,7 @@ function failingCheckOutput(): string {
   writeFileSync(join(tree, 'package.json'), '{"type":"module"}\n')
   writeFileSync(join(tree, 'src', 'money.js'), 'export function formatMoney(n) { return "$" + n.toFixed(2) }\n')
   writeFileSync(join(tree, 'test', 'own.test.js'), "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('totals add up', () => assert.equal(1, 2))\n")
-  const grade = gradeTree(tree, checkPath)
+  const grade = gradeTree(tree, tasksDir, loadTask(tasksDir, 'negative-money'))
   assert.equal(grade.pass, false)
   return grade.reason
 }
@@ -95,11 +96,11 @@ test("the hidden check's tests and assertions never reach the findings, only wha
   const run = realRun()
   const md = findingsMarkdown(evidence({
     records: [run],
-    scores: [score(run.id, 'correctness', false, output)],
+    scores: [{ ...score(run.id, 'correctness', false, output), check: ['test/zz-bench-check.test.js'] }],
     bench: [cell({ pass: false, checkOutput: output }), cell({ task: 'recurring' })],
     reviews: { [run.id]: 'VERDICT: approve' },
   }))
-  const check = readFileSync(checkPath, 'utf8')
+  const check = readFileSync(join(tasksDir, 'negative-money', 'test', 'zz-bench-check.test.js'), 'utf8')
   for (const line of check.split('\n').map((l) => l.trim()).filter((l) => l.length > 12)) assert.ok(!md.includes(line), `leaked: ${line}`)
   assert.ok(!md.includes('negative amounts put the sign'))
   assert.ok(!md.includes("'-$12.00'"))
@@ -154,7 +155,7 @@ test('the scope gate passes changes to the graded agents prompts', () => {
 })
 
 test('the scope gate rejects its own prompt, judges, code, workflows, bench tasks, the image, and paths that climb out', () => {
-  for (const path of ['src/cli.ts', 'bench/tasks/negative-money/check.test.js', '.github/workflows/run.yml', 'docker/Dockerfile',
+  for (const path of ['src/cli.ts', '.factory/bench/tasks/negative-money/test/zz-bench-check.test.js', '.github/workflows/run.yml', 'docker/Dockerfile',
     'agents/../src/x.md', 'agents/sub/x.md', 'agents/review.txt', 'README.md', 'agents/improve.md', 'scorers/scope.md']) {
     assert.deepEqual(patchProblems(diffFor('agents/review.md') + diffFor(path)), [`out of scope: ${path}`], path)
   }

@@ -33,29 +33,65 @@ Every comment the factory posts is scrubbed of known secrets and checked with gi
 
 The record has `kind: "revise"`, `trigger: "pr#<number>"`, and `status: "pr_updated"` when it pushed. Its `implement-0` stage is the revision you asked for.
 
-To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`. Each task in `bench/tasks/<task-id>/` has the issue text (`task.md`) and a hidden check (`check.test.js`) that the agent never sees.
+To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`. Bench tasks are described under [Benchmark tasks](#benchmark-tasks).
 
 ## Score runs
 
 `examples/score.yml` in a target repo calls `.github/workflows/score.yml` on demand. It grades every implement run in `factory-runs` that opened a PR and has no score yet (revise runs follow your feedback, so they are not graded), and pushes one file per run and scorer to `scores/<run-id>/<scorer>.json`. A score is never recomputed. Each grades the last commit the factory pushed to the PR, so later human commits do not count.
 
-The judges also grade every bench cell whose transcript and diff were stored and that has no score yet, and push `scores/bench/<bench-id>/<cell>/<scorer>.json`. A cell's `issue.md` is its task's `task.md`, and its correctness is the cell's own check. Each score names what it grades in `subject`: `{ "kind": "run", "runId" }` or `{ "kind": "bench", "benchId", "cell" }`.
+The judges also grade every bench cell whose transcript and diff were stored and that has no score yet, and push `scores/bench/<bench-id>/<cell>/<scorer>.json`. A cell's `issue.md` is its task's issue text, and its correctness is the cell's own check. Each score names what it grades in `subject`: `{ "kind": "run", "runId" }` or `{ "kind": "bench", "benchId", "cell" }`.
 
-- `correctness` runs for runs with a bench task. It copies the task's check into a fresh copy of the graded tree as `test/zz-bench-check.test.js` and runs `node --test` in the agent image with no network and no credentials. It passes only when the whole suite passes, so breaking the repo's own tests fails too. The reason is the tail of the test output.
+- `correctness` runs for runs with a bench task, read from the run's repo at its default branch. It grades a fresh copy of the PR's tree the way a bench cell is graded: the task's `setup`, then its check files and its `grade` command with no network and no credentials. The reason is the tail of the grade's output.
 - Every `scorers/<name>.md` is an LLM judge for one failure mode, in the same format as the agent files. A judge reads `issue.md`, `diff.patch`, and `transcript.md` (the implement stages as readable sections) from a read-only directory and ends with `SCORE: pass` or `SCORE: fail`. Anything else, or a judge that does not finish, scores `null`. Its scrubbed transcript is stored next to the score as `<scorer>.jsonl`.
 
 The workflow has three steps: `score-prepare` (FACTORY_GH_TOKEN) gathers the evidence, `score-judge` (model credentials only) runs the check and the judges, and `score-save` (FACTORY_GH_TOKEN) scrubs and pushes.
 
+## Benchmark tasks
+
+A repo's bench tasks live in that repo, on its default branch, one directory per task: `.factory/bench/tasks/<task-id>/` with a `task.md` and the hidden check files. `task.md` is frontmatter, then the issue the agent gets (a `# Title` line and the body):
+
+```md
+---
+base: 0123456789abcdef0123456789abcdef01234567    # the commit the agent starts from
+fix: 89abcdef0123456789abcdef0123456789abcdef     # optional: the commit that resolved it, for bench-verify
+check: tests/export.test.mjs                     # files in the task dir, copied to the same path in the tree
+setup: npm ci                                    # optional: runs before the agent, with network
+grade: node --test --test-reporter=spec tests/export.test.mjs   # runs with no network; exit 0 passes
+---
+# Export drops the last row
+...
+```
+
+A check file replaces the repo's own file at that path, so a task mined from history uses the fix commit's version of the test. The check is copied in after the agent finishes. No agent ever sees `.factory/bench`: the bench agent gets a one-commit clone of `base` with that directory removed, so it can neither see a check nor read the later history that holds the fix, and a factory run removes it from the agent's tree and the review's tree, and never pushes a change to it. It is also left out of the stored diff and removed from every graded tree.
+
+`setup` installs dependencies before the agent runs, so the agent starts from a tree it can test and the grade needs no network. The tradeoff: a change that needs a new dependency fails the grade, since nothing is installed after the agent.
+
+To add a task:
+
+1. Pick a commit that fixed an issue and whose diff changed a test. `base` is its parent, `fix` the commit itself.
+2. Copy the fix's version of each changed test file into the task directory at the same path, and list them in `check`. Name only those files in `grade`, so the rest of the suite cannot fail the task for unrelated reasons.
+3. Write the issue as a user would have reported it, without naming the fix.
+4. Check that the task fails at its base and passes with the fix's non-check changes, in the agent image with no model credentials, from a clone of the repo with its full history and the task in its working tree:
+
+```sh
+docker build -t factory-agent docker
+node src/cli.ts bench-verify <clone of the repo> [task ids, or all]
+```
+
+5. Commit the task to the repo's default branch. A hand-written task has no `fix` and is checked by running a bench.
+
+`kenryu42/factory-sandbox` has 16 hand-written tasks that run its whole `node --test` suite with the check added as `test/zz-bench-check.test.js`. `kenryu42/next-step-japan` has 9 tasks mined from its history, which pass `bench-verify`.
+
 ## Benchmark configs
 
-`examples/bench.yml`, copied into `factory-sandbox`, calls `.github/workflows/bench.yml` on demand with:
+`examples/bench.yml`, copied into a repo that has bench tasks, calls `.github/workflows/bench.yml` on demand with:
 
-- `tasks`: bench task ids separated by commas, or `all`.
-- `configs`: `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-flash`.
+- `tasks`: ids of that repo's bench tasks separated by commas, or `all` of them.
+- `configs`: `harness:model` pairs separated by commas, such as `claude-code:opus,claude-code:sonnet,pi:deepseek/deepseek-flash`.
 - `factory_ref`: the ref of this repo whose `agents/implement.md` (and code) is benchmarked. The default is `main`.
 - `bench_id`: the results directory. The default is the workflow run id.
 
-For each task and config, `bench-run` (model credentials only) copies one fixed commit of the target repo's default branch, runs the implement agent on the task's issue text with that harness and model, and grades the tree with the task's check. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` with the scrubbed transcript (`.jsonl`) and the agent's diff against the base commit (`.patch`) next to it. The diff is taken before the check is copied in, so it never holds the hidden check. A diff or transcript that gitleaks flags is withheld.
+The workflow checks the repo's default branch out with its full history and reads the tasks there. For each task, `bench-run` (model credentials only) makes a one-commit clone at the task's `base` and runs its `setup`. For each config it runs the implement agent on a copy with that harness and model, diffs the agent's tree against `base`, and grades it. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` with the scrubbed transcript (`.jsonl`) and the agent's diff (`.patch`) next to it. The diff is taken before the check is copied in, so it never holds the hidden check. A diff or transcript that gitleaks flags is withheld.
 
 Correctness alone rarely separates two prompts once every config passes, so run the score workflow after a bench: the judges then grade each cell, and the report compares the judges' pass rates between benches.
 
