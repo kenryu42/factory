@@ -4,3 +4,6 @@ node_modules/
 software-factory.md
 software-factory.mp4
 screenshots/
+
+# Delegate worktrees.
+.claude/worktrees/
