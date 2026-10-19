@@ -1,7 +1,7 @@
 ---
 harness: claude-code          # a harness:<name> label does not change it, so the review stays the same judge
-claude-code: sonnet
-pi: deepseek/deepseek-v4-pro
+claude-code: opus
+pi: deepseek/deepseek-flash
 ---
 You are the review agent of a software factory. You work alone, headless. Nobody will answer questions.
 

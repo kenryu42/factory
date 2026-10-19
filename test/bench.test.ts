@@ -4,9 +4,9 @@ import { test } from 'node:test'
 import { cellName, parseConfigs, parseTask } from '../src/bench.ts'
 
 test('configs are harness:model pairs, and the model may hold a slash or a colon', () => {
-  assert.deepEqual(parseConfigs('claude-code:haiku, pi:deepseek/deepseek-v4-flash,'), [
+  assert.deepEqual(parseConfigs('claude-code:haiku, pi:deepseek/deepseek-flash,'), [
     { harness: 'claude-code', model: 'haiku' },
-    { harness: 'pi', model: 'deepseek/deepseek-v4-flash' },
+    { harness: 'pi', model: 'deepseek/deepseek-flash' },
   ])
   assert.deepEqual(parseConfigs('pi:ollama/qwen3:32b'), [{ harness: 'pi', model: 'ollama/qwen3:32b' }])
 })
@@ -28,6 +28,6 @@ test('a task file is the issue: the heading is the title, the rest the body', ()
 })
 
 test('each cell has its own result file, with the model made path-safe', () => {
-  assert.equal(cellName('negative-money', { harness: 'pi', model: 'deepseek/deepseek-v4-flash' }), 'negative-money__pi__deepseek_deepseek-v4-flash')
+  assert.equal(cellName('negative-money', { harness: 'pi', model: 'deepseek/deepseek-flash' }), 'negative-money__pi__deepseek_deepseek-flash')
   assert.notEqual(cellName('recurring', { harness: 'claude-code', model: 'haiku' }), cellName('recurring', { harness: 'claude-code', model: 'sonnet' }))
 })

@@ -12,7 +12,7 @@ on:
         type: string
         default: all
       configs:
-        description: Comma-separated harness:model pairs, such as claude-code:haiku,pi:deepseek/deepseek-v4-flash
+        description: Comma-separated harness:model pairs, such as claude-code:haiku,pi:deepseek/deepseek-flash
         type: string
         required: true
       factory_ref:

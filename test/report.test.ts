@@ -166,7 +166,7 @@ test('spec runs count under their own status', () => {
 function score(runId: string, scorer: string, pass: boolean | null): Score {
   return {
     subject: { kind: 'run', runId }, scorer, pass, reason: pass === null ? 'The judge did not finish.' : 'ℹ pass 10', sha: 'c535f0b', factorySha: 'f', at: '2026-10-19T12:00:00Z',
-    judge: scorer === 'correctness' ? null : { harness: 'pi', model: 'deepseek/deepseek-v4-flash', billing: 'api', costUsd: 0.002, wallTimeS: 20 },
+    judge: scorer === 'correctness' ? null : { harness: 'pi', model: 'deepseek/deepseek-flash', billing: 'api', costUsd: 0.002, wallTimeS: 20 },
   }
 }
 
@@ -215,7 +215,7 @@ test('the Pareto frontier keeps every config that no other is both cheaper and b
 
 function cell(over: Partial<BenchResult>): BenchResult {
   return {
-    benchId: 'b1', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-v4-flash', model: 'deepseek/deepseek-v4-flash',
+    benchId: 'b1', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-flash', model: 'deepseek/deepseek-flash',
     factoryRef: 'main', factorySha: '844065abe6575eaedda591277ce42e62d8b45126', baseSha: '226c94b271c2171da2bfdeac39542313240dea84', billing: 'api',
     pass: true, checkOutput: 'ℹ pass 10', usage: { inputTokens: 4451, cacheReadTokens: 25600, outputTokens: 1395, costUsd: 0.01 }, costUsd: 0.01,
     wallTimeS: 20, at: '2026-10-19T12:00:00Z', transcript: 'stored', diff: 'stored', ...over,
@@ -235,13 +235,13 @@ test('bench summary: pass rate over graded tasks, average cost and time, and the
     cell({ ...sonnet, task: 'recurring', costUsd: 0.5 }),
   ], [])
   const byConfig = Object.fromEntries(b1.configs.map((c) => [`${c.harness}:${c.model}`, c]))
-  assert.equal(byConfig['pi:deepseek/deepseek-v4-flash'].tasks, 3)
-  assert.equal(byConfig['pi:deepseek/deepseek-v4-flash'].passRate, 0.5)
-  assert.ok(Math.abs(byConfig['pi:deepseek/deepseek-v4-flash'].avgCostUsd! - 0.02) < 1e-12)
-  assert.equal(byConfig['pi:deepseek/deepseek-v4-flash'].avgWallTimeS, 30)
+  assert.equal(byConfig['pi:deepseek/deepseek-flash'].tasks, 3)
+  assert.equal(byConfig['pi:deepseek/deepseek-flash'].passRate, 0.5)
+  assert.ok(Math.abs(byConfig['pi:deepseek/deepseek-flash'].avgCostUsd! - 0.02) < 1e-12)
+  assert.equal(byConfig['pi:deepseek/deepseek-flash'].avgWallTimeS, 30)
   assert.equal(byConfig['claude-code:haiku'].avgCostUsd, 0.05, 'an unpriced task does not count as free')
   assert.deepEqual(b1.configs.map((c) => [`${c.harness}:${c.model}`, c.pareto]), [
-    ['pi:deepseek/deepseek-v4-flash', true],
+    ['pi:deepseek/deepseek-flash', true],
     ['claude-code:haiku', false],
     ['claude-code:sonnet', true],
   ])
@@ -271,7 +271,7 @@ test('the page carries each run score and the bench summary', () => {
 })
 
 const judged = (benchId: string, task: string, scorer: string, pass: boolean | null): Score => ({
-  ...score('', scorer, pass), subject: { kind: 'bench', benchId, cell: `${task}__pi__deepseek_deepseek-v4-flash` },
+  ...score('', scorer, pass), subject: { kind: 'bench', benchId, cell: `${task}__pi__deepseek_deepseek-flash` },
 })
 
 // main's bench (rerun after the improvement's) and the improvement branch's bench, over the same tasks and pi config.
@@ -300,7 +300,7 @@ test('a bench on an improvement branch is compared with main per config and scor
   const [cmp, ...rest] = benchComparisons(bench, scores)
   assert.equal(rest.length, 0)
   assert.deepEqual([cmp.a.benchId, cmp.b.benchId], ['main-2', 'imp-1'], 'main is A even when it ran later')
-  assert.deepEqual(cmp.configs.map((c) => [`${c.harness}:${c.model}`, c.tasks]), [['pi:deepseek/deepseek-v4-flash', 3]])
+  assert.deepEqual(cmp.configs.map((c) => [`${c.harness}:${c.model}`, c.tasks]), [['pi:deepseek/deepseek-flash', 3]])
   const metrics = Object.fromEntries(cmp.configs[0].metrics.map((m) => [m.scorer, m]))
   assert.deepEqual(Object.keys(metrics), ['correctness', 'redundant-tests', 'scope'])
   assert.deepEqual([metrics.correctness.a, metrics.correctness.b], [{ pass: 2, fail: 1, unknown: 0 }, { pass: 3, fail: 0, unknown: 0 }])

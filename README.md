@@ -41,7 +41,7 @@ The workflow has three steps: `score-prepare` (FACTORY_GH_TOKEN) gathers the evi
 `examples/bench.yml`, copied into `factory-sandbox`, calls `.github/workflows/bench.yml` on demand with:
 
 - `tasks`: bench task ids separated by commas, or `all`.
-- `configs`: `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-v4-flash`.
+- `configs`: `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-flash`.
 - `factory_ref`: the ref of this repo whose `agents/implement.md` (and code) is benchmarked. The default is `main`.
 - `bench_id`: the results directory. The default is the workflow run id.
 

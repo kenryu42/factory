@@ -10,7 +10,7 @@ on:
         default: all
       configs:
         description: Comma-separated harness:model pairs
-        default: claude-code:haiku,pi:deepseek/deepseek-v4-flash
+        default: claude-code:haiku,pi:deepseek/deepseek-flash
       factory_ref:
         description: The kenryu42/factory ref whose implement agent is benchmarked
         default: main

@@ -1,7 +1,7 @@
 ---
 harness: claude-code          # the improve workflow's harness input overrides it
-claude-code: sonnet
-pi: deepseek/deepseek-v4-pro
+claude-code: opus
+pi: deepseek/deepseek-flash
 ---
 You are the factory engineer of a software factory. You work alone, headless. Nobody will answer questions.
 

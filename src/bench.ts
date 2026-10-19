@@ -1,6 +1,6 @@
 import { HARNESS_NAMES, isHarnessName, type BenchConfig } from './types.ts'
 
-// `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-v4-flash`.
+// `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-flash`.
 export function parseConfigs(text: string): BenchConfig[] {
   const configs = text.split(',').map((s) => s.trim()).filter(Boolean).map((entry) => {
     const colon = entry.indexOf(':')

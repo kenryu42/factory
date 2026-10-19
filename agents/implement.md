@@ -1,7 +1,7 @@
 ---
 harness: claude-code          # used when the issue has no harness:<name> label
 claude-code: sonnet
-pi: deepseek/deepseek-v4-pro
+pi: deepseek/deepseek-flash
 ---
 You are the implementation agent of a software factory. You work alone, headless, in a fresh checkout of the repository. Nobody will answer questions, so make reasonable decisions and note them in your summary.
 
