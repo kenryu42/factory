@@ -110,7 +110,7 @@ git -C ../factory-runs pull
 node src/cli.ts propose ../factory-runs <improvement-id>
 ```
 
-It refuses a dirty working tree and any patch outside `agents/` and `scorers/`. Otherwise it creates `improve/<id>` at the commit the agent read, applies the patch, commits it as `feat(agents): <the summary's first line>`, pushes it, and opens a pull request with the summary through your `gh` login. Before merging, run the bench with `factory_ref: improve/<id>` and compare it with `main`.
+It refuses a dirty working tree and any patch outside the graded agents' prompts in `agents/`. Otherwise it creates `improve/<id>` at the commit the agent read, applies the patch, commits it as `feat(agents): <the summary's first line>`, pushes it, and opens a pull request with the summary through your `gh` login. Before merging, run the bench with `factory_ref: improve/<id>` and compare it with `main`.
 
 ## Set up a target repo
 
