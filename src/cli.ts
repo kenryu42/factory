@@ -24,12 +24,13 @@
 //   findings        print the findings.md the improve agent would read from a local factory-runs checkout
 //   propose         open a pull request on the factory checkout you run it in from a proposed improvement   (your gh login)
 //   models          check that every pi model in agents/ and scorers/ is in the image's catalog   (CI, no keys)
+//   bench-verify    check that each of a repo's bench tasks fails at its base and passes with its fix commit, in the image   (no keys)
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process'
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { cellName, parseConfigs, parseTask } from './bench.ts'
+import { BENCH_DIR, cellName, cloneBase, loadTask, loadTasks, parseConfigs, selectTasks, tasksDirOf, type BenchTask } from './bench.ts'
 import { loadAgent, loadAgents, parseScore, parseVerdict } from './agents.ts'
 import { approvedSpec, decide, splitBenchMarker, SPEC_MARKER, type IssueComment } from './guard.ts'
 import { credential, harnesses } from './harnesses.ts'
@@ -51,8 +52,6 @@ const AGENT_TIMEOUT_MS = 40 * 60 * 1000
 const factoryDir = resolve(dirname(new URL(import.meta.url).pathname), '..')
 const agentsDir = join(factoryDir, 'agents')
 const scorersDir = join(factoryDir, 'scorers')
-const tasksDir = join(factoryDir, 'bench', 'tasks')
-const checkFile = (task: string) => join(tasksDir, task, 'check.test.js')
 const FACTORY_EMAIL = 'factory@users.noreply.github.com'
 const image = () => process.env.FACTORY_IMAGE ?? 'factory-agent'
 const env = (name: string) => {
@@ -141,6 +140,25 @@ const docker = (mounts: string[], flags: string[]) => [
 ]
 // The bench check runs the agent's code, so it gets no network and no credentials.
 const sandbox = (tree: string) => docker([`${tree}:/work`], ['--network', 'none'])
+const SETUP_TIMEOUT_MS = 15 * 60 * 1000
+
+// A task's setup, such as installing dependencies, runs in the image with network and no credentials, so the agent
+// starts from a tree it can test and the grade itself can run with no network.
+function setupTree(tree: string, task: BenchTask) {
+  if (!task.setup) return
+  const [cmd, ...args] = [...docker([`${tree}:/work`], []), 'sh', '-c', task.setup]
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: SETUP_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 })
+  if (r.status !== 0) {
+    const tail = `${r.stdout ?? ''}${r.stderr ?? ''}`.trimEnd().split('\n').slice(-20).join('\n')
+    throw new Error(`${task.id}: setup \`${task.setup}\` failed (${r.status ?? r.signal ?? r.error?.message}):\n${tail}`)
+  }
+}
+
+// The task's base commit, without the repo's bench tasks, with the task's setup run in it.
+function checkoutBase(source: string, task: BenchTask, dest: string) {
+  cloneBase(source, task, dest)
+  setupTree(dest, task)
+}
 
 type Launch = { harness: HarnessName; model: string; prompt: string; mounts: string[]; log: string }
 type Launched = { transcript: Transcript; ok: boolean; billing: Billing; startedAt: string; wallTimeS: number }
@@ -207,6 +225,8 @@ function implementContext(plan: Plan, review: string | null) {
 function agent(round: number) {
   const plan = readPlan()
   const work = resolve(env('FACTORY_WORK_DIR'))
+  // The repo's bench tasks hold hidden checks, and a run can be tied to one of them.
+  rmSync(join(work, BENCH_DIR), { recursive: true, force: true })
   if (round === 0) {
     const baseSha = sh('git', ['-C', work, 'rev-parse', 'HEAD'])
     if (plan.kind === 'spec') return runStage('spec', 0, issueSection(plan.issue), [`${work}:/work:ro`], baseSha)
@@ -281,7 +301,8 @@ function publishChange(plan: Plan, round: number) {
   const branch = prev?.branch ?? `factory/issue-${number}-${plan.runId}`
   sh('git', ['-C', pub, 'checkout', '--quiet', '-b', branch, prev ? `origin/${branch}` : baseSha])
   // --checksum: an edit that keeps a file's size within the clone's second would pass rsync's size-and-mtime check.
-  sh('rsync', ['-a', '--checksum', '--delete', '--exclude=.git', `${resolve(env('FACTORY_WORK_DIR'))}/`, `${pub}/`])
+  // The agent's tree has no bench tasks, and the excluded path keeps --delete from removing the repo's.
+  sh('rsync', ['-a', '--checksum', '--delete', '--exclude=.git', `--exclude=/${BENCH_DIR}`, `${resolve(env('FACTORY_WORK_DIR'))}/`, `${pub}/`])
   sh('git', ['-C', pub, 'add', '-A'])
 
   const changed = sh('git', ['-C', pub, 'diff', '--cached', '--name-only']).split('\n').filter(Boolean)
@@ -323,7 +344,7 @@ function review(round: number) {
   if (plan.spec) writeFileSync(join(input, 'plan.md'), `${plan.spec}\n`)
   copyFileSync(runFile(`diff-${round}.patch`), join(input, 'diff.patch'))
   // The published tree without .git, whose remote URL holds the GitHub token. The review's edits land in this copy and are dropped.
-  sh('rsync', ['-a', '--exclude=.git', `${runFile('pub')}/`, `${tree}/`])
+  sh('rsync', ['-a', '--exclude=.git', `--exclude=/${BENCH_DIR}`, `${runFile('pub')}/`, `${tree}/`])
   runStage('review', round, '', [`${tree}:/work`, `${input}:/input:ro`], stage('implement', 0)!.baseSha)
 }
 
@@ -437,15 +458,20 @@ function scorePrepare() {
   console.log(`score-prepare: ${[...pending.values()].flat().length} scores pending over ${pending.size} runs, ` +
     `${[...benchPending.values()].flat().length} over ${benchPending.size} bench cells`)
 
+  // One clone per repo, at its default branch, which holds the repo's bench tasks.
   const clones = new Map<string, string>()
+  const clone = (name: string) => {
+    const dir = runFile(`repos/${name.replace('/', '__')}`)
+    if (!clones.has(name)) {
+      rmSync(dir, { recursive: true, force: true })
+      sh('git', ['clone', '--quiet', `https://x-access-token:${token}@github.com/${name}.git`, dir])
+      clones.set(name, dir)
+    }
+    return dir
+  }
   for (const [run, jobs] of pending) {
     try {
-      const repo = clones.get(run.repo) ?? runFile(`repos/${run.repo.replace('/', '__')}`)
-      if (!clones.has(run.repo)) {
-        rmSync(repo, { recursive: true, force: true })
-        sh('git', ['clone', '--quiet', `https://x-access-token:${token}@github.com/${run.repo}.git`, repo])
-        clones.set(run.repo, repo)
-      }
+      const repo = clone(run.repo)
       const git = (...args: string[]) => sh('git', ['-C', repo, ...args], { maxBuffer: 64 * 1024 * 1024 })
       // The PR ref outlives a deleted branch. The graded tree is the factory's last commit, not later human commits.
       git('fetch', '--quiet', 'origin', `pull/${run.prUrl!.split('/').pop()}/head`)
@@ -459,6 +485,14 @@ function scorePrepare() {
         const dir = scoreJobDir(subject, scorer)
         if (!dir) continue
         if (scorer === CORRECTNESS) {
+          const task = join(tasksDirOf(repo), run.task!)
+          if (!existsSync(join(task, 'task.md'))) {
+            console.log(`score-prepare: warning: ${run.id} names bench task ${run.task}, which ${run.repo} does not have; no correctness score`)
+            rmSync(dir, { recursive: true, force: true })
+            continue
+          }
+          // score-judge has no token to read the repo, so the task comes along.
+          cpSync(task, join(dir, 'tasks', run.task!), { recursive: true })
           mkdirSync(join(dir, 'tree'), { recursive: true })
           sh('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', repo, sha, join(dir, 'tree')])
         } else {
@@ -480,7 +514,8 @@ function scorePrepare() {
   for (const [cell, jobs] of benchPending) {
     const subject = benchSubject(cell)
     try {
-      const evidence = benchEvidence(runsDir, tasksDir, cell)
+      if (!cell.repo) throw new Error('the cell does not name its repo')
+      const evidence = benchEvidence(runsDir, tasksDirOf(clone(cell.repo)), cell)
       for (const { scorer } of jobs) {
         const dir = scoreJobDir(subject, scorer)
         if (!dir) continue
@@ -524,7 +559,9 @@ function scoreJudge() {
       let score: Score
       if (job.scorer === CORRECTNESS) {
         const tree = join(dir, 'tree')
-        score = { ...base, ...gradeTree(tree, checkFile(job.task!), sandbox(tree)), at: new Date().toISOString(), judge: null }
+        const task = loadTask(join(dir, 'tasks'), job.task!)
+        setupTree(tree, task)
+        score = { ...base, ...gradeTree(tree, join(dir, 'tasks'), task, sandbox(tree)), at: new Date().toISOString(), judge: null, check: task.check }
       } else {
         const def = judges.get(job.scorer)
         if (!def) throw new Error(`no scorers/${job.scorer}.md`)
@@ -576,40 +613,48 @@ const benchCells = () => runFile('bench')
 
 function benchRun() {
   const configs = parseConfigs(env('BENCH_CONFIGS'))
-  const known = subdirs(join(factoryDir, 'bench', 'tasks'))
-  const wanted = env('BENCH_TASKS').trim()
-  const tasks = wanted === 'all' ? known : wanted.split(',').map((t) => t.trim()).filter(Boolean)
-  const unknown = tasks.filter((t) => !known.includes(t))
-  if (unknown.length || !tasks.length) throw new Error(`unknown bench tasks: ${unknown.join(', ') || '(none given)'}; known: ${known.join(', ')}`)
-  const base = resolve(env('FACTORY_WORK_DIR'))
-  const baseSha = sh('git', ['-C', base, 'rev-parse', 'HEAD'])
-  // The code, tasks and hidden checks come from this checkout; only the prompt under test comes from factory_ref, so any
-  // proposal branch can be benched however far main has moved, and a branch can never change the checks it is graded by.
+  // The caller repo at its default branch with its full history: its bench tasks, and every task's base commit.
+  const source = resolve(env('FACTORY_WORK_DIR'))
+  const tasks = selectTasks(loadTasks(source), env('BENCH_TASKS'))
+  const repo = env('GITHUB_REPOSITORY')
+  // The code comes from this checkout and only the prompt under test from factory_ref, so any proposal branch can be
+  // benched however far main has moved. The tasks live in the caller repo, which a factory branch cannot change.
   const refDir = resolve(env('BENCH_FACTORY_REF_DIR'))
   const implement = loadAgent(join(refDir, 'agents'), 'implement')
-  const fixed = { benchId: env('BENCH_ID'), factoryRef: env('FACTORY_REF'), factorySha: sh('git', ['-C', refDir, 'rev-parse', 'HEAD']), baseSha }
+  const fixed = { benchId: env('BENCH_ID'), factoryRef: env('FACTORY_REF'), factorySha: sh('git', ['-C', refDir, 'rev-parse', 'HEAD']) }
   mkdirSync(benchCells(), { recursive: true })
-  console.log(`bench-run: ${fixed.benchId}: ${tasks.length} tasks x ${configs.length} configs, implement.md at ${fixed.factoryRef} (${fixed.factorySha.slice(0, 7)}), base ${baseSha.slice(0, 7)}`)
+  console.log(`bench-run: ${fixed.benchId}: ${tasks.length} tasks x ${configs.length} configs, implement.md at ${fixed.factoryRef} (${fixed.factorySha.slice(0, 7)})`)
 
   for (const task of tasks) {
-    const { title, body } = parseTask(readFileSync(join(factoryDir, 'bench', 'tasks', task, 'task.md'), 'utf8'))
-    for (const config of configs) {
-      const cell = cellName(task, config)
-      if (existsSync(join(benchCells(), `${cell}.json`))) continue
+    const todo = configs.filter((config) => !existsSync(join(benchCells(), `${cellName(task.id, config)}.json`)))
+    if (!todo.length) continue
+    const base = join(benchCells(), 'base', task.id)
+    try {
+      checkoutBase(source, task, base)
+    } catch (e) {
+      console.log(`bench-run: warning: ${task.id} not run: ${(e as Error).message}`)
+      process.exitCode = 1
+      continue
+    }
+    for (const config of todo) {
+      const cell = cellName(task.id, config)
       try {
         const work = join(benchCells(), cell, 'work')
         const tree = join(benchCells(), cell, 'tree')
         rmSync(join(benchCells(), cell), { recursive: true, force: true })
         mkdirSync(tree, { recursive: true })
         sh('rsync', ['-a', `${base}/`, `${work}/`])
-        const prompt = `${implement.prompt}\n\n## Issue: ${title}\n\n${body}`
+        const prompt = `${implement.prompt}\n\n## Issue: ${task.title}\n\n${task.body}`
         const run = runAgent(cell, { ...config, prompt, mounts: [`${work}:/work`], log: join(benchCells(), cell) })
         sh('rsync', ['-a', '--exclude=.git', `${work}/`, `${tree}/`])
-        const { diff, grade } = diffAndGrade(base, baseSha, tree, checkFile(task), sandbox(tree))
+        const { diff, grade } = diffAndGrade(base, tree, tasksDirOf(source), task, sandbox(tree))
         writeFileSync(join(benchCells(), `${cell}.patch`), diff)
         const result: Omit<BenchResult, 'transcript' | 'diff'> = {
           ...fixed,
-          task,
+          baseSha: task.base,
+          repo,
+          task: task.id,
+          check: task.check,
           harness: config.harness,
           requestedModel: config.model,
           model: run.transcript.model ?? config.model,
@@ -626,9 +671,52 @@ function benchRun() {
       } catch (e) {
         console.log(`bench-run: warning: ${cell} not run: ${(e as Error).message.split('\n')[0]}`)
         process.exitCode = 1
+      } finally {
+        // The trees hold the repo's dependencies; only the result files are kept.
+        rmSync(join(benchCells(), cell), { recursive: true, force: true })
       }
     }
+    rmSync(base, { recursive: true, force: true })
   }
+}
+
+// Proves a task is fair before any model is paid: at its base the grade fails, and with the non-check changes of its
+// fix commit applied it passes, both in the same image and sandbox as bench-run. source is a clone of the repo with its
+// full history, whose working tree holds the tasks.
+function benchVerify(source: string, wanted: string) {
+  const tasks = selectTasks(loadTasks(source), wanted)
+  const unfixed = tasks.filter((t) => !t.fix).map((t) => t.id)
+  if (unfixed.length) throw new Error(`no fix commit to verify against: ${unfixed.join(', ')}`)
+  const work = mkdtempSync(join(tmpdir(), 'bench-verify-'))
+  const grade = (task: BenchTask, tree: string) => {
+    const started = Date.now()
+    const g = gradeTree(tree, tasksDirOf(source), task, sandbox(tree))
+    return { ...g, seconds: ((Date.now() - started) / 1000).toFixed(1) }
+  }
+  // The tests that failed, by name, from node's spec reporter; otherwise the output's last line.
+  const failed = (output: string) => [...new Set([...output.matchAll(/^\s*✖ (.+?) \(\d[\d.]*m?s\)$/gm)].map((m) => m[1]))].join('; ') || output.split('\n').at(-1)
+  let ok = true
+  try {
+    for (const task of tasks) {
+      const base = join(work, task.id, 'base')
+      checkoutBase(source, task, base)
+      const atBase = join(work, task.id, 'at-base')
+      const atFix = join(work, task.id, 'at-fix')
+      for (const tree of [atBase, atFix]) sh('rsync', ['-a', '--exclude=.git', `${base}/`, `${tree}/`])
+      const patch = sh('git', ['-C', source, 'diff', '--binary', task.base, task.fix!, '--', '.', ...task.check.map((p) => `:(exclude)${p}`)], { maxBuffer: 64 * 1024 * 1024 })
+      if (patch) sh('git', ['apply', '--whitespace=nowarn'], { cwd: atFix, input: `${patch}\n` })
+      const before = grade(task, atBase)
+      const after = grade(task, atFix)
+      const good = before.pass === false && after.pass === true
+      ok &&= good
+      console.log(`${good ? 'ok' : 'BAD'} ${task.id}: base ${before.pass ? 'pass' : 'fail'} in ${before.seconds}s (${failed(before.reason)}), fix ${after.pass ? 'pass' : 'fail'} in ${after.seconds}s`)
+      if (!good) console.log(after.pass ? before.reason : after.reason)
+      rmSync(join(work, task.id), { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+  if (!ok) process.exitCode = 1
 }
 
 function benchSave() {
@@ -963,6 +1051,10 @@ const commands: Record<string, () => void> = {
   'score-save': scoreSave,
   'bench-run': benchRun,
   'bench-save': benchSave,
+  'bench-verify': () => {
+    if (!args[0]) throw new Error('usage: node src/cli.ts bench-verify <clone of the repo with its full history> [task ids, or all]')
+    benchVerify(args[0], args[1] ?? 'all')
+  },
   'improve-prepare': improvePrepare,
   'improve-run': improveRun,
   'improve-save': improveSave,

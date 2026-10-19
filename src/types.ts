@@ -147,6 +147,9 @@ export type Score = {
   at: string
   // null for deterministic scorers.
   judge: { harness: HarnessName; model: string; billing: Billing; costUsd: number | null; wallTimeS: number } | null
+  // The hidden check files a correctness score was graded with, so its output can be summarized without quoting them.
+  // Absent from judge scores and from scores saved before it was recorded.
+  check?: string[]
 }
 
 // One harness and model to benchmark, written `harness:model`.
@@ -156,7 +159,11 @@ export type BenchConfig = { harness: HarnessName; model: string }
 // Stored at bench/<benchId>/<task>__<harness>__<requested model, / as _>.json, next to its .jsonl transcript and .patch diff.
 export type BenchResult = {
   benchId: string
+  // owner/name of the repo that holds the task. Absent from cells saved before it was recorded.
+  repo?: string
   task: string
+  // The task's hidden check files. Absent from cells saved before it was recorded.
+  check?: string[]
   harness: HarnessName
   requestedModel: string
   // The exact model, as the harness reports it.

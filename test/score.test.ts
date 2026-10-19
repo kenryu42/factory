@@ -7,7 +7,8 @@ import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loadAgents, parseScore } from '../src/agents.ts'
 import { harnesses } from '../src/harnesses.ts'
-import { benchEvidence, CHECK_FILE, diffAndGrade, gradeTree, pendingBenchScores, pendingScores, transcriptMarkdown } from '../src/score.ts'
+import { cloneBase, loadTask, tasksDirOf } from '../src/bench.ts'
+import { benchEvidence, diffAndGrade, gradeTree, pendingBenchScores, pendingScores, transcriptMarkdown } from '../src/score.ts'
 import type { BenchResult, RunRecord } from '../src/types.ts'
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
@@ -95,18 +96,20 @@ function repo(name: string, formatMoney: string, ownTest = "assert.equal(formatM
     `import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { formatMoney } from '../src/money.js'\n\ntest('two decimals', () => {\n  ${ownTest}\n})\n`)
   return dir
 }
-const check = fileURLToPath(new URL('../bench/tasks/negative-money/check.test.js', import.meta.url))
+const tasksDir = tasksDirOf(fileURLToPath(new URL('./fixtures/sandbox', import.meta.url)))
+const task = loadTask(tasksDir, 'negative-money')
+const CHECK_FILE = 'test/zz-bench-check.test.js'
 const fixed = "return `${amount < 0 ? '-' : ''}$${Math.abs(amount).toFixed(2)}`"
 
 test('correctness passes a tree that resolves the task and keeps its own tests green', () => {
-  const grade = gradeTree(repo('fixed', fixed), check)
+  const grade = gradeTree(repo('fixed', fixed), tasksDir, task)
   assert.equal(grade.pass, true, grade.reason)
   assert.match(grade.reason, /negative amounts put the sign before the dollar sign/)
   assert.match(grade.reason, /ℹ pass 2\nℹ fail 0/)
 })
 
 test('correctness fails the unfixed tree and its output names the failing check', () => {
-  const grade = gradeTree(repo('unfixed', 'return `$${amount.toFixed(2)}`'), check)
+  const grade = gradeTree(repo('unfixed', 'return `$${amount.toFixed(2)}`'), tasksDir, task)
   assert.equal(grade.pass, false)
   assert.match(grade.reason, /✖ negative amounts put the sign before the dollar sign/)
   assert.match(grade.reason, /'\$-12\.00'/)
@@ -114,15 +117,43 @@ test('correctness fails the unfixed tree and its output names the failing check'
 })
 
 test("correctness fails a tree that passes the check but breaks the repo's own tests", () => {
-  const grade = gradeTree(repo('broke-own', fixed, "assert.equal(formatMoney(4.5), '$4.5')"), check)
+  const grade = gradeTree(repo('broke-own', fixed, "assert.equal(formatMoney(4.5), '$4.5')"), tasksDir, task)
   assert.equal(grade.pass, false)
   assert.match(grade.reason, /✖ two decimals/)
 })
 
 test('a bench task without a check cannot be graded', () => {
-  const grade = gradeTree(repo('no-check', fixed), join(tmp, 'no-such-task', 'check.test.js'))
+  const grade = gradeTree(repo('no-check', fixed), tmp, task)
   assert.equal(grade.pass, null)
   assert.match(grade.reason, /no check/)
+})
+
+// A task shaped like a real-repo one: its check is the fix commit's version of a test file the repo already has.
+const replacing = { id: 'replace', check: ['test/money.test.js'], grade: 'node --test --test-reporter=spec test/money.test.js' }
+function replacingTask(): string {
+  const dir = join(tmp, 'replacing-tasks')
+  mkdirSync(join(dir, 'replace', 'test'), { recursive: true })
+  writeFileSync(join(dir, 'replace', 'test', 'money.test.js'),
+    "import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { formatMoney } from '../src/money.js'\n\ntest('refunds put the sign first', () => assert.equal(formatMoney(-12), '-$12.00'))\n")
+  return dir
+}
+
+test("a check replaces the repo's own test file at the same path, so the repo's old version cannot pass the grade", () => {
+  const unfixed = repo('replace-unfixed', 'return `$${amount.toFixed(2)}`')
+  const grade = gradeTree(unfixed, replacingTask(), replacing)
+  assert.equal(grade.pass, false)
+  assert.match(grade.reason, /✖ refunds put the sign first/)
+  assert.doesNotMatch(grade.reason, /two decimals/, "the repo's own version of the file is gone")
+  assert.match(readFileSync(join(unfixed, 'test', 'money.test.js'), 'utf8'), /refunds put the sign first/)
+})
+
+test("the task's grade command decides what runs: here only the check's file, not the rest of the suite", () => {
+  const tree = repo('replace-fixed', fixed)
+  writeFileSync(join(tree, 'test', 'unrelated.test.js'), "import { test } from 'node:test'\ntest('broken elsewhere', () => { throw new Error('no') })\n")
+  const grade = gradeTree(tree, replacingTask(), replacing)
+  assert.equal(grade.pass, true, grade.reason)
+  assert.doesNotMatch(grade.reason, /broken elsewhere/)
+  assert.equal(gradeTree(tree, replacingTask(), { ...replacing, grade: 'node --test' }).pass, false, 'the whole suite fails on the unrelated test')
 })
 
 // A bench cell as bench-save stores it: pi resolved negative-money in bench b7.
@@ -145,35 +176,40 @@ test('pending bench scores: every judge for each cell with a stored transcript a
 })
 
 test("a graded bench cell's evidence holds the task's issue, the agent's own change and tests, and never the hidden check", () => {
-  const base = repo('bench-base', 'return `$${amount.toFixed(2)}`')
-  const git = (...args: string[]) => {
-    const r = spawnSync('git', ['-C', base, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8' })
+  // The repo's history, whose base commit already holds its bench tasks.
+  const source = repo('bench-source', 'return `$${amount.toFixed(2)}`')
+  cpSync(tasksDir, tasksDirOf(source), { recursive: true })
+  const git = (dir: string, ...args: string[]) => {
+    const r = spawnSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8' })
     assert.equal(r.status, 0, r.stderr)
     return r.stdout.trim()
   }
-  git('init', '--quiet')
-  git('add', '-A')
-  git('commit', '--quiet', '-m', 'base')
-  const baseSha = git('rev-parse', 'HEAD')
+  git(source, 'init', '--quiet')
+  git(source, 'add', '-A')
+  git(source, 'commit', '--quiet', '-m', 'base')
+  const baseSha = git(source, 'rev-parse', 'HEAD')
+  const base = join(tmp, 'bench-base')
+  cloneBase(source, { id: task.id, base: baseSha }, base)
   const tree = join(tmp, 'bench-tree')
   cpSync(base, tree, { recursive: true, filter: (src) => !src.includes('.git') })
   writeFileSync(join(tree, 'src', 'money.js'), `export function formatMoney(amount) {\n  ${fixed}\n}\n`)
   writeFileSync(join(tree, 'test', 'refund.test.js'), "import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { formatMoney } from '../src/money.js'\n\ntest('refunds', () => assert.equal(formatMoney(-12), '-$12.00'))\n")
 
-  const { diff, grade } = diffAndGrade(base, baseSha, tree, check)
+  const { diff, grade } = diffAndGrade(base, tree, tasksDir, { ...task, base: baseSha })
   assert.equal(grade.pass, true, grade.reason)
   assert.match(diff, /^\+\+\+ b\/src\/money\.js$/m)
   assert.match(diff, /^\+\+\+ b\/test\/refund\.test\.js$/m)
   assert.ok(!diff.includes(CHECK_FILE), 'the hidden check is not part of the change')
-  assert.equal(git('status', '--porcelain'), '', 'the base checkout is untouched')
+  assert.ok(!diff.includes('.factory'), "the bench tasks the agent never had are not part of the change")
+  assert.equal(git(base, 'status', '--porcelain', '--', '.', ':(exclude).factory/bench'), '', 'the base checkout is untouched')
 
   const runs = join(tmp, 'runs')
   const cell = benchCell({ baseSha })
   mkdirSync(join(runs, 'bench', 'b7'), { recursive: true })
   writeFileSync(join(runs, 'bench', 'b7', 'negative-money__pi__deepseek_deepseek-flash.patch'), diff)
   writeFileSync(join(runs, 'bench', 'b7', 'negative-money__pi__deepseek_deepseek-flash.jsonl'), fixture('pi-negative-money.jsonl'))
-  const evidence = benchEvidence(runs, fileURLToPath(new URL('../bench/tasks', import.meta.url)), cell)
-  assert.equal(evidence['issue.md'], readFileSync(new URL('../bench/tasks/negative-money/task.md', import.meta.url), 'utf8'))
+  const evidence = benchEvidence(runs, tasksDir, cell)
+  assert.equal(evidence['issue.md'], '# Refunds print as $-12.00\n\n`formatMoney(-12)` returns `$-12.00`. It should be `-$12.00`. Positive amounts should not change.\n')
   assert.equal(evidence['diff.patch'], diff)
   assert.match(evidence['transcript.md'], /^# Stage implement-0\n/)
   assert.match(evidence['transcript.md'], /## 21\. Tool call: bash\n\n```\ncommand: npm test/)

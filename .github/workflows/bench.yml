@@ -1,14 +1,15 @@
 # Called from a target repo's bench.yml (see examples/bench.yml). Runs the implement agent prompt of kenryu42/factory
-# at factory_ref, with main's code, tasks and hidden checks, on each bench task, under each harness:model config, on one fixed commit of the target repo's default
-# branch. Each tree is graded by the task's check. Nothing is posted to GitHub: the results go to
-# <owner>/factory-runs under bench/<bench_id>/. The run step gets model credentials only, the save step FACTORY_GH_TOKEN.
+# at factory_ref, with main's code, on each of the caller repo's bench tasks (.factory/bench/tasks on its default
+# branch), under each harness:model config. Each task starts from its own base commit and is graded by its check.
+# Nothing is posted to GitHub: the results go to <owner>/factory-runs under bench/<bench_id>/. The run step gets
+# model credentials only, the save step FACTORY_GH_TOKEN.
 name: factory bench
 
 on:
   workflow_call:
     inputs:
       tasks:
-        description: Comma-separated bench task ids from bench/tasks, or all
+        description: Comma-separated ids of this repo's tasks in .factory/bench/tasks, or all of them
         type: string
         default: all
       configs:
@@ -62,10 +63,12 @@ jobs:
         with:
           node-version: 24
 
+      # The tasks, and the full history, so every task's base commit is here.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: work
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: ./factory/.github/actions/tools
