@@ -11,6 +11,7 @@ test('claude-code: reads cost, tokens and the final summary', () => {
   const t = harnesses['claude-code'].parse(fixture('claude-code'))
   assert.equal(t.ok, true)
   assert.deepEqual(t.usage, { inputTokens: 12352, cacheReadTokens: 54211, outputTokens: 688, costUsd: 0.00335591 })
+  assert.equal(t.model, 'claude-haiku-5-5', 'the exact model, not the alias it was asked for')
   assert.match(t.finalText, /a \+ b/)
 })
 
@@ -21,6 +22,7 @@ test('pi: sums cost and tokens over every assistant turn', () => {
   assert.equal(t.usage.cacheReadTokens, 7424)
   assert.equal(t.usage.outputTokens, 446)
   assert.ok(Math.abs(t.usage.costUsd! - 0.001729644) < 1e-12)
+  assert.equal(t.model, 'deepseek/deepseek-flash')
   assert.match(t.finalText, /add\(\)` now returns `a \+ b`/)
 })
 
@@ -37,6 +39,7 @@ test('an empty transcript counts as failed with zero usage', () => {
     const t = harness.parse('')
     assert.equal(t.ok, false)
     assert.equal(t.usage.outputTokens, 0)
+    assert.equal(t.model, null)
   }
 })
 

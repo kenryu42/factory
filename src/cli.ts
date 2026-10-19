@@ -99,7 +99,7 @@ function agent() {
     ok: transcript.ok && r.status === 0,
     agent: def.name,
     harness: harnessName,
-    model,
+    model: transcript.model ?? model,
     baseSha,
     startedAt,
     wallTimeS: Math.round((Date.now() - Date.parse(startedAt)) / 1000),

@@ -34,6 +34,7 @@ const texts = (content: unknown): string =>
 const failed: Transcript = {
   ok: false,
   finalText: '',
+  model: null,
   usage: { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: null },
 }
 
@@ -53,6 +54,8 @@ export const harnesses: Record<HarnessName, Harness> = {
       return {
         ok: result.subtype === 'success' && !result.is_error,
         finalText: result.result ?? '',
+        // Claude Code can call a second, smaller model for side tasks. Keep the one that cost the most.
+        model: Object.entries(result.modelUsage ?? {}).sort(([, a]: any, [, b]: any) => b.costUSD - a.costUSD)[0]?.[0] ?? null,
         usage: {
           inputTokens: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
           cacheReadTokens: u.cache_read_input_tokens ?? 0,
@@ -88,6 +91,7 @@ export const harnesses: Record<HarnessName, Harness> = {
           .filter((c: Event) => c.type === 'text')
           .map((c: Event) => c.text)
           .join('\n'),
+        model: last ? `${last.provider}/${last.model}` : null,
         usage: {
           inputTokens: sum((u) => u.input + u.cacheWrite),
           cacheReadTokens: sum((u) => u.cacheRead),

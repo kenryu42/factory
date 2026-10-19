@@ -39,6 +39,8 @@ export type Usage = {
 export type Transcript = {
   ok: boolean
   finalText: string
+  // The exact model that answered, as the harness reports it. Aliases like `sonnet` drift over time.
+  model: string | null
   usage: Usage
 }
 
