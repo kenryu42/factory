@@ -23,7 +23,27 @@ Every comment the factory posts is scrubbed of known secrets and checked with gi
 2. Edit that comment until the plan is what you want. Only your own comments count, so nobody else can plant a plan.
 3. Add `factory`. The implement agent follows the plan, and the review agent checks the change against it.
 
-To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`.
+To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue body. The id is recorded as the run's `task`. Each task in `bench/tasks/<task-id>/` has the issue text (`task.md`) and a hidden check (`check.test.js`) that the agent never sees.
+
+## Score runs
+
+`examples/score.yml` in a target repo calls `.github/workflows/score.yml` on demand. It grades every implement run in `factory-runs` that opened a PR and has no score yet, and pushes one file per run and scorer to `scores/<run-id>/<scorer>.json`. A score is never recomputed. Each grades the last commit the factory pushed to the PR, so later human commits do not count.
+
+- `correctness` runs for runs with a bench task. It copies the task's check into a fresh copy of the graded tree as `test/zz-bench-check.test.js` and runs `node --test` in the agent image with no network and no credentials. It passes only when the whole suite passes, so breaking the repo's own tests fails too. The reason is the tail of the test output.
+- Every `scorers/<name>.md` is an LLM judge for one failure mode, in the same format as the agent files. A judge reads `issue.md`, `diff.patch`, and `transcript.md` (the implement stages as readable sections) from a read-only directory and ends with `SCORE: pass` or `SCORE: fail`. Anything else, or a judge that does not finish, scores `null`. Its scrubbed transcript is stored next to the score as `<scorer>.jsonl`.
+
+The workflow has three steps: `score-prepare` (FACTORY_GH_TOKEN) gathers the evidence, `score-judge` (model credentials only) runs the check and the judges, and `score-save` (FACTORY_GH_TOKEN) scrubs and pushes.
+
+## Benchmark configs
+
+`examples/bench.yml`, copied into `factory-sandbox`, calls `.github/workflows/bench.yml` on demand with:
+
+- `tasks`: bench task ids separated by commas, or `all`.
+- `configs`: `harness:model` pairs separated by commas, such as `claude-code:haiku,pi:deepseek/deepseek-v4-flash`.
+- `factory_ref`: the ref of this repo whose `agents/implement.md` (and code) is benchmarked. The default is `main`.
+- `bench_id`: the results directory. The default is the workflow run id.
+
+For each task and config, `bench-run` (model credentials only) copies one fixed commit of the target repo's default branch, runs the implement agent on the task's issue text with that harness and model, and grades the tree with the task's check. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` and the scrubbed transcript next to it.
 
 ## Set up a target repo
 
@@ -54,7 +74,9 @@ node src/cli.ts report ../factory-runs
 open ../factory-runs/report.html
 ```
 
-`report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by kind, harness, and status. Click a run to see its stages and their review verdicts, and click a stage to read its transcript as messages, tool calls, and tool results.
+`report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by kind, harness, and status. Click a run to see its scores with their reasons, its stages and their review verdicts, and click a stage to read its transcript as messages, tool calls, and tool results.
+
+Below the runs, the page shows each scorer's pass rate per implement harness and a review calibration table: the final review verdict against correctness, where approve and wrong is a defect the review missed. Each benchmark gets a table of pass rate, average cost, and average wall time per config, and a chart of pass rate against cost that marks the configs no other config beats on both.
 
 The report asks GitHub for each PR's state through your `gh` login. A PR counts as reverted when a merged PR in the same repo says `Reverts <repo>#<number>`, which is what GitHub's Revert button writes. Human touches are the comments, reviews, and commits on the PR by the repo owner. Bots and the factory's own commits do not count. If `gh` cannot look up a PR, the report prints a warning and leaves that run's outcome blank.
 
@@ -64,6 +86,8 @@ For your own queries, build a SQLite database from the run files:
 node src/cli.ts db ../factory-runs
 sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) from runs group by harness'
 sqlite3 ../factory-runs/runs.sqlite 'select agent, verdict, count(*) from stages where agent = "review" group by verdict'
+sqlite3 ../factory-runs/runs.sqlite 'select scorer, avg(pass), count(*) from scores group by scorer'
+sqlite3 ../factory-runs/runs.sqlite 'select bench_id, harness, requested_model, avg(pass), avg(cost_usd) from bench group by 1, 2, 3'
 ```
 
 Both commands write generated files into the `factory-runs` checkout. Do not commit `report.html` or `runs.sqlite`; add them to that repo's `.gitignore`.
@@ -78,4 +102,4 @@ pnpm typecheck
 pnpm test
 ```
 
-The tests parse real transcripts from each harness in `test/fixtures/`.
+The tests parse real transcripts from each harness in `test/fixtures/`. The correctness tests run `node --test` on small repos in a temp directory.

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { HARNESS_NAMES, type HarnessName, type Outcome, type ReportRow, type RunStatus, type Step } from './types.ts'
+import { CORRECTNESS } from './score.ts'
+import { HARNESS_NAMES, type BenchResult, type HarnessName, type Outcome, type ReportRow, type RunStatus, type Score, type Step, type Verdict } from './types.ts'
 
 const MAX_INPUT = 2000
 const MAX_OUTPUT = 4000
@@ -75,17 +76,102 @@ function clipStep(s: Step): Step {
   return s
 }
 
+export type Tally = { pass: number; fail: number; unknown: number }
+
+// Scorer -> implement harness -> how that harness's runs scored. Correctness comes first.
+export function scoreSummary(rows: ReportRow[], scores: Score[]): { scorer: string; byHarness: Record<HarnessName, Tally> }[] {
+  const harnessOf = new Map(rows.map((r) => [r.id, r.harness]))
+  const names = [...new Set(scores.map((s) => s.scorer))].sort((a, b) => Number(b === CORRECTNESS) - Number(a === CORRECTNESS) || a.localeCompare(b))
+  return names.map((scorer) => {
+    const byHarness = Object.fromEntries(HARNESS_NAMES.map((h) => [h, { pass: 0, fail: 0, unknown: 0 }])) as Record<HarnessName, Tally>
+    for (const s of scores) {
+      const harness = harnessOf.get(s.runId)
+      if (s.scorer !== scorer || !harness) continue
+      byHarness[harness][s.pass === null ? 'unknown' : s.pass ? 'pass' : 'fail']++
+    }
+    return { scorer, byHarness }
+  })
+}
+
+// The final review verdict against correctness, over runs that have both. approve.wrong counts defects the review missed.
+export type Calibration = Record<Verdict, { correct: number; wrong: number }>
+
+export function calibration(rows: ReportRow[], scores: Score[]): Calibration {
+  const correct = new Map(scores.filter((s) => s.scorer === CORRECTNESS && s.pass !== null).map((s) => [s.runId, s.pass!]))
+  const cal: Calibration = { approve: { correct: 0, wrong: 0 }, request_changes: { correct: 0, wrong: 0 } }
+  for (const r of rows) {
+    const pass = correct.get(r.id)
+    if (r.verdict && pass !== undefined) cal[r.verdict][pass ? 'correct' : 'wrong']++
+  }
+  return cal
+}
+
+// Indexes of the points no other point beats: none is at most as costly and at least as good, and better on one.
+export function paretoFrontier(points: { costUsd: number; passRate: number }[]): number[] {
+  return points.flatMap((p, i) => points.some((q) =>
+    q.costUsd <= p.costUsd && q.passRate >= p.passRate && (q.costUsd < p.costUsd || q.passRate > p.passRate)) ? [] : [i])
+}
+
+export type BenchConfigSummary = {
+  harness: HarnessName
+  model: string
+  tasks: number
+  // Over tasks with a check. null when no task had one.
+  passRate: number | null
+  // Averages over the tasks that reported them.
+  avgCostUsd: number | null
+  avgWallTimeS: number
+  pareto: boolean
+}
+
+export type BenchSummary = { benchId: string; factoryRef: string; factorySha: string; baseSha: string; at: string; configs: BenchConfigSummary[] }
+
+const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
+
+export function benchSummary(results: BenchResult[]): BenchSummary[] {
+  const byBench = Map.groupBy(results, (r) => r.benchId)
+  return [...byBench].map(([benchId, cells]) => {
+    const configs = [...Map.groupBy(cells, (c) => `${c.harness}:${c.requestedModel}`).values()].map((mine): BenchConfigSummary => {
+      const graded = mine.filter((c) => c.pass !== null)
+      return {
+        harness: mine[0].harness,
+        model: mine[0].requestedModel,
+        tasks: mine.length,
+        passRate: graded.length ? graded.filter((c) => c.pass).length / graded.length : null,
+        avgCostUsd: avg(mine.map((c) => c.costUsd).filter((c): c is number => c !== null)),
+        avgWallTimeS: avg(mine.map((c) => c.wallTimeS))!,
+        pareto: false,
+      }
+    })
+    const plotted = configs.filter((c) => c.avgCostUsd !== null && c.passRate !== null)
+    for (const i of paretoFrontier(plotted.map((c) => ({ costUsd: c.avgCostUsd!, passRate: c.passRate! })))) plotted[i].pareto = true
+    const first = cells.reduce((a, b) => (a.at < b.at ? a : b))
+    return { benchId, factoryRef: first.factoryRef, factorySha: first.factorySha, baseSha: first.baseSha, at: first.at, configs }
+  }).sort((a, b) => b.at.localeCompare(a.at))
+}
+
 export type ReportModel = {
   generatedAt: string
   rows: ReportRow[]
   // Run id -> stage (`<agent>-<round>`) -> steps. null when the transcript was withheld or is missing.
   steps: Record<string, Record<string, Step[] | null>>
+  scores: Score[]
+  bench: BenchResult[]
 }
 
 export function renderReport(model: ReportModel): string {
   const steps = Object.fromEntries(Object.entries(model.steps).map(([id, stages]) =>
     [id, Object.fromEntries(Object.entries(stages).map(([stage, s]) => [stage, s && s.map(clipStep)]))]))
-  const data = { ...model, steps, summary: summarize(model.rows) }
+  const data = {
+    generatedAt: model.generatedAt,
+    rows: model.rows,
+    steps,
+    scores: model.scores,
+    summary: summarize(model.rows),
+    scoreSummary: scoreSummary(model.rows, model.scores),
+    calibration: calibration(model.rows, model.scores),
+    bench: benchSummary(model.bench),
+  }
   // `<` escaped so no string in the data, such as `</script>` in a transcript, can end the script element.
   const json = JSON.stringify(data).replace(/</g, '\\u003c')
   const template = readFileSync(new URL('./report.html', import.meta.url), 'utf8')

@@ -8,7 +8,7 @@ export function isHarnessName(value: string): value is HarnessName {
 export type AgentName = 'spec' | 'implement' | 'review'
 
 export type Agent = {
-  name: AgentName
+  name: string
   defaultHarness: HarnessName
   models: Record<HarnessName, string>
   prompt: string
@@ -128,4 +128,48 @@ export type ReportRow = RunRecord & {
   // null when unknown: the run opened no PR, or the GitHub lookup failed.
   outcome: Outcome | null
   humanTouches: number | null
+}
+
+// A grade of one implement run's final pushed tree. One file per (run, scorer): scores/<runId>/<scorer>.json.
+export type Score = {
+  runId: string
+  // `correctness`, or the name of a judge file in scorers/.
+  scorer: string
+  // null when the run could not be scored; reason says why.
+  pass: boolean | null
+  reason: string
+  // The commit that was graded: the last commit the factory pushed to the PR.
+  sha: string
+  factorySha: string
+  at: string
+  // null for deterministic scorers.
+  judge: { harness: HarnessName; model: string; billing: Billing; costUsd: number | null; wallTimeS: number } | null
+}
+
+// One harness and model to benchmark, written `harness:model`.
+export type BenchConfig = { harness: HarnessName; model: string }
+
+// One cell of a benchmark: one task under one config.
+// Stored at bench/<benchId>/<task>__<harness>__<requested model, / as _>.json.
+export type BenchResult = {
+  benchId: string
+  task: string
+  harness: HarnessName
+  requestedModel: string
+  // The exact model, as the harness reports it.
+  model: string
+  // The ref the bench was asked for, and the commit it resolved to.
+  factoryRef: string
+  factorySha: string
+  baseSha: string
+  billing: Billing
+  // null when the task has no check.
+  pass: boolean | null
+  // The tail of the check's output.
+  checkOutput: string
+  usage: Usage
+  costUsd: number | null
+  wallTimeS: number
+  at: string
+  transcript: 'stored' | 'withheld'
 }

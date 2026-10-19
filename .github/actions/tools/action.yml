@@ -1,0 +1,24 @@
+# The tools every factory workflow needs on the runner: a pinned gitleaks and the agent image from docker/.
+name: factory tools
+description: Install gitleaks and build the factory-agent image.
+runs:
+  using: composite
+  steps:
+    - name: Install gitleaks
+      shell: bash
+      run: |
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64) platform=linux_x64 sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+          macOS-ARM64) platform=darwin_arm64 sum=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
+          *) echo "No pinned gitleaks build for ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+        esac
+        archive="$RUNNER_TEMP/gitleaks_8.30.1_$platform.tar.gz"
+        curl -sSfL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_$platform.tar.gz"
+        echo "$sum  $archive" | shasum -a 256 -c -
+        mkdir -p "$RUNNER_TEMP/bin"
+        tar -xzf "$archive" -C "$RUNNER_TEMP/bin" gitleaks
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+    - name: Build agent image
+      shell: bash
+      run: docker build -q -t factory-agent "$GITHUB_ACTION_PATH/../../../docker"

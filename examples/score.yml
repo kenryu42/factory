@@ -1,0 +1,17 @@
+# Copy to .github/workflows/score.yml in a target repo to grade recorded runs on demand.
+# It scores every run in <owner>/factory-runs that is not scored yet, whatever repo the run was in.
+name: factory score
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  score:
+    uses: kenryu42/factory/.github/workflows/score.yml@main
+    # To run on your own Mac, uncomment the two lines below (see examples/factory.yml).
+    # with:
+    #   runner: '["self-hosted", "factory"]'
+    secrets: inherit

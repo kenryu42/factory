@@ -1,0 +1,85 @@
+# Called from a target repo's bench.yml (see examples/bench.yml). Runs the implement agent of kenryu42/factory at
+# factory_ref on each bench task, under each harness:model config, on one fixed commit of the target repo's default
+# branch. Each tree is graded by the task's check. Nothing is posted to GitHub: the results go to
+# <owner>/factory-runs under bench/<bench_id>/. The run step gets model credentials only, the save step FACTORY_GH_TOKEN.
+name: factory bench
+
+on:
+  workflow_call:
+    inputs:
+      tasks:
+        description: Comma-separated bench task ids from bench/tasks, or all
+        type: string
+        default: all
+      configs:
+        description: Comma-separated harness:model pairs, such as claude-code:haiku,pi:deepseek/deepseek-v4-flash
+        type: string
+        required: true
+      factory_ref:
+        description: The kenryu42/factory ref whose agents/implement.md is benchmarked
+        type: string
+        default: main
+      bench_id:
+        description: Names the results directory. Defaults to the workflow run id
+        type: string
+        default: ''
+      runner:
+        description: JSON value for runs-on, such as '"ubuntu-latest"' or '["self-hosted", "factory"]'
+        type: string
+        default: '"ubuntu-latest"'
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: { required: false }
+      ANTHROPIC_API_KEY: { required: false }
+      DEEPSEEK_API_KEY: { required: false }
+      FACTORY_GH_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 360
+    env:
+      FACTORY_WORK_DIR: ${{ github.workspace }}/work
+      BENCH_ID: ${{ inputs.bench_id || github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: kenryu42/factory
+          ref: ${{ inputs.factory_ref }}
+          path: factory
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: work
+          persist-credentials: false
+
+      - uses: ./factory/.github/actions/tools
+
+      - run: echo "FACTORY_RUN_DIR=$RUNNER_TEMP/factory-bench" >> "$GITHUB_ENV"
+
+      - name: Run
+        run: node factory/src/cli.ts bench-run
+        env:
+          BENCH_TASKS: ${{ inputs.tasks }}
+          BENCH_CONFIGS: ${{ inputs.configs }}
+          FACTORY_REF: ${{ inputs.factory_ref }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: always()
+        name: Save
+        run: node factory/src/cli.ts bench-save
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

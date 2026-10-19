@@ -6,6 +6,14 @@
 //   review <round>  run the review agent on the tree that round published   (model key only)
 //   respond <round> post that review on the PR   (FACTORY_GH_TOKEN)
 //   record          push the run record and scrubbed transcripts   (FACTORY_GH_TOKEN)
+// .github/workflows/score.yml grades recorded runs:
+//   score-prepare   find unscored runs and write one job dir per (run, scorer) with the evidence   (FACTORY_GH_TOKEN)
+//   score-judge     run the correctness check and the judges in each job dir   (model keys only)
+//   score-save      push the scores and scrubbed judge transcripts   (FACTORY_GH_TOKEN)
+// .github/workflows/bench.yml replays bench tasks across harness:model configs:
+//   bench-run       run the implement agent on each task x config and grade the tree   (model keys only)
+//   bench-save      push the results and scrubbed transcripts   (FACTORY_GH_TOKEN)
+// Local:
 //   db              build runs.sqlite from a local factory-runs checkout
 //   report          build report.html from a local factory-runs checkout   (your gh login)
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process'
@@ -13,18 +21,27 @@ import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtemp
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { loadAgent, parseVerdict } from './agents.ts'
-import { approvedSpec, decide, SPEC_MARKER, type IssueComment } from './guard.ts'
+import { cellName, parseConfigs, parseTask } from './bench.ts'
+import { loadAgent, loadAgents, parseScore, parseVerdict } from './agents.ts'
+import { approvedSpec, decide, splitBenchMarker, SPEC_MARKER, type IssueComment } from './guard.ts'
 import { credential, harnesses } from './harnesses.ts'
 import { prOutcome, renderReport, type PrView, type ReportModel } from './report.ts'
+import { CORRECTNESS, gradeTree, pendingScores, transcriptMarkdown } from './score.ts'
 import { scrub } from './scrub.ts'
-import type { AgentName, Issue, Plan, PublishResult, ReportRow, RunRecord, RunStatus, StageResult, StageRun } from './types.ts'
+import type {
+  AgentName, BenchResult, Billing, HarnessName, Issue, Plan, PublishResult, ReportRow, RunRecord, RunStatus, Score, StageResult, StageRun, Transcript,
+} from './types.ts'
 
 const SECRET_ENV = [...Object.values(harnesses).flatMap((h) => h.credentials.map((c) => c.env)), 'FACTORY_GH_TOKEN']
 // Five stages at most, inside the job's 240-minute timeout.
 const AGENT_TIMEOUT_MS = 40 * 60 * 1000
 
 const factoryDir = resolve(dirname(new URL(import.meta.url).pathname), '..')
+const agentsDir = join(factoryDir, 'agents')
+const scorersDir = join(factoryDir, 'scorers')
+const checkFile = (task: string) => join(factoryDir, 'bench', 'tasks', task, 'check.test.js')
+const FACTORY_EMAIL = 'factory@users.noreply.github.com'
+const image = () => process.env.FACTORY_IMAGE ?? 'factory-agent'
 const env = (name: string) => {
   const value = process.env[name]
   if (!value) throw new Error(`${name} is not set`)
@@ -34,6 +51,9 @@ const runDir = () => env('FACTORY_RUN_DIR')
 const runFile = (name: string) => join(runDir(), name)
 const readJson = <T>(name: string): T | null => (existsSync(runFile(name)) ? JSON.parse(readFileSync(runFile(name), 'utf8')) : null)
 const writeJson = (name: string, value: unknown) => writeFileSync(runFile(name), JSON.stringify(value, null, 2) + '\n')
+const readJsonFile = <T>(file: string): T => JSON.parse(readFileSync(file, 'utf8'))
+const writeJsonFile = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+const subdirs = (dir: string) => (existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort() : [])
 
 function sh(cmd: string, args: string[], opts: SpawnSyncOptions = {}): string {
   const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts })
@@ -87,53 +107,69 @@ function guard() {
   setOutput('run', 'true')
 }
 
+const docker = (mounts: string[], flags: string[]) => [
+  'docker', 'run', '--rm',
+  '--user', `${process.getuid!()}:${process.getgid!()}`,
+  '-e', 'HOME=/tmp/home',
+  ...flags,
+  ...mounts.flatMap((m) => ['-v', m]), '-w', '/work',
+  image(),
+]
+// The bench check runs the agent's code, so it gets no network and no credentials.
+const sandbox = (tree: string) => docker([`${tree}:/work`], ['--network', 'none'])
+
+type Launch = { harness: HarnessName; model: string; prompt: string; mounts: string[]; log: string }
+type Launched = { transcript: Transcript; ok: boolean; billing: Billing; startedAt: string; wallTimeS: number }
+
 // Runs one agent in the factory image. The container sees its mounts and one model credential, nothing else.
-function runStage(agent: AgentName, round: number, context: string, mounts: string[], baseSha: string) {
-  const plan = readPlan()
-  const def = loadAgent(factoryDir, agent)
-  // A harness label compares implement harnesses, so spec and review stay on their own default.
-  const harnessName = agent === 'implement' ? plan.harness ?? def.defaultHarness : def.defaultHarness
+// The raw transcript goes to <log>.jsonl and the CLI's stderr to <log>.stderr.txt.
+function runAgent(name: string, { harness: harnessName, model, prompt, mounts, log }: Launch): Launched {
   const harness = harnesses[harnessName]
-  const model = def.models[harnessName]
   const cred = credential(harnessName, process.env)
   if (!cred) throw new Error(`no credential for ${harnessName}: set ${harness.credentials.map((c) => c.env).join(' or ')}`)
 
-  const name = stageName(agent, round)
   const startedAt = new Date().toISOString()
-  const out = openSync(runFile(`${name}.jsonl`), 'w')
-  const err = openSync(runFile(`${name}.stderr.txt`), 'w')
+  const out = openSync(`${log}.jsonl`, 'w')
+  const err = openSync(`${log}.stderr.txt`, 'w')
   console.log(`${name}: ${harnessName} (${model}), ${cred.billing} billing`)
-  const r = spawnSync('docker', [
-    'run', '--rm',
-    '--user', `${process.getuid!()}:${process.getgid!()}`,
-    '-e', 'HOME=/tmp/home',
-    '-e', cred.env,
-    ...mounts.flatMap((m) => ['-v', m]), '-w', '/work',
-    process.env.FACTORY_IMAGE ?? 'factory-agent',
-    ...harness.command(model, context ? `${def.prompt}\n\n${context}` : def.prompt),
-  ], { stdio: ['ignore', out, err], timeout: AGENT_TIMEOUT_MS })
+  const [cmd, ...args] = [...docker(mounts, ['-e', cred.env]), ...harness.command(model, prompt)]
+  const r = spawnSync(cmd, args, { stdio: ['ignore', out, err], timeout: AGENT_TIMEOUT_MS })
   closeSync(out)
   closeSync(err)
 
-  const transcript = harness.parse(readFileSync(runFile(`${name}.jsonl`), 'utf8'))
+  const transcript = harness.parse(readFileSync(`${log}.jsonl`, 'utf8'))
   const ok = transcript.ok && r.status === 0
+  const wallTimeS = Math.round((Date.now() - Date.parse(startedAt)) / 1000)
+  console.log(`${name}: exit=${r.status ?? r.signal} ok=${ok} cost=${transcript.usage.costUsd ?? 'n/a'} time=${wallTimeS}s`)
+  if (!ok) console.log(scrub(readFileSync(`${log}.stderr.txt`, 'utf8'), secrets()).split('\n').slice(-20).join('\n'))
+  return { transcript, ok, billing: cred.billing, startedAt, wallTimeS }
+}
+
+function runStage(agent: AgentName, round: number, context: string, mounts: string[], baseSha: string) {
+  const plan = readPlan()
+  const def = loadAgent(agentsDir, agent)
+  // A harness label compares implement harnesses, so spec and review stay on their own default.
+  const harness = agent === 'implement' ? plan.harness ?? def.defaultHarness : def.defaultHarness
+  const model = def.models[harness]
+  const name = stageName(agent, round)
+  const prompt = context ? `${def.prompt}\n\n${context}` : def.prompt
+  const { transcript, ok, billing, startedAt, wallTimeS } = runAgent(name, { harness, model, prompt, mounts, log: runFile(name) })
   const result: StageResult = {
     agent,
     round,
-    harness: harnessName,
+    harness,
     model: transcript.model ?? model,
-    billing: cred.billing,
+    billing,
     ok,
     verdict: agent === 'review' && ok ? parseVerdict(transcript.finalText) : null,
     usage: transcript.usage,
     startedAt,
-    wallTimeS: Math.round((Date.now() - Date.parse(startedAt)) / 1000),
+    wallTimeS,
     finalText: transcript.finalText,
     baseSha,
   }
   writeJson(`${name}.json`, result)
-  console.log(`${name}: exit=${r.status ?? r.signal} ok=${ok}${agent === 'review' ? ` verdict=${result.verdict}` : ''} cost=${result.usage.costUsd ?? 'n/a'} time=${result.wallTimeS}s`)
-  if (!ok) console.log(scrub(readFileSync(runFile(`${name}.stderr.txt`), 'utf8'), secrets()).split('\n').slice(-20).join('\n'))
+  if (agent === 'review') console.log(`${name}: verdict=${result.verdict}`)
 }
 
 function implementContext(plan: Plan, review: string | null) {
@@ -238,7 +274,7 @@ function publishChange(plan: Plan, round: number) {
   }
 
   const git = (...args: string[]) => sh('git', ['-C', pub, '-c', 'core.hooksPath=/dev/null', ...args], { maxBuffer: 64 * 1024 * 1024 })
-  git('-c', 'user.name=factory', '-c', 'user.email=factory@users.noreply.github.com',
+  git('-c', 'user.name=factory', '-c', `user.email=${FACTORY_EMAIL}`,
     'commit', '--quiet', '-m', prev ? `Address review of #${number}` : `${plan.issue.title}\n\nResolves #${number}.`)
   git('push', '--quiet', ...(prev ? [] : ['--force']), 'origin', branch)
   const sha = git('rev-parse', 'HEAD')
@@ -289,14 +325,13 @@ function record() {
   const stages = results.map(({ finalText, baseSha, ...s }): StageRun => {
     const name = stageName(s.agent, s.round)
     const raw = existsSync(runFile(`${name}.jsonl`)) ? readFileSync(runFile(`${name}.jsonl`), 'utf8') : ''
-    const text = scrub(raw, secrets())
-    const stored = text.length > 0 && !hasLeak(text)
-    if (stored) transcripts.set(name, text)
-    return { ...s, transcript: stored ? 'stored' : 'withheld' }
+    const text = storable(raw)
+    if (text) transcripts.set(name, text)
+    return { ...s, transcript: text ? 'stored' : 'withheld' }
   })
 
   const main = results.find((s) => s.agent === plan.kind && s.round === 0)
-  const def = loadAgent(factoryDir, plan.kind)
+  const def = loadAgent(agentsDir, plan.kind)
   const harness = main?.harness ?? (plan.kind === 'implement' ? plan.harness : null) ?? def.defaultHarness
   const opened = published(0)
   const total = (pick: (s: StageRun) => number) => stages.reduce((n, s) => n + pick(s), 0)
@@ -326,33 +361,245 @@ function record() {
     runUrl: runLink(),
   }
 
-  const runsRepo = `${plan.issue.repo.split('/')[0]}/factory-runs`
-  const dir = runFile('runs-repo')
-  rmSync(dir, { recursive: true, force: true })
-  sh('git', ['clone', '--quiet', '--depth', '1', `https://x-access-token:${token}@github.com/${runsRepo}.git`, dir])
+  const dir = cloneRunsRepo(token, plan.issue.repo.split('/')[0])
   mkdirSync(join(dir, 'runs'), { recursive: true })
   mkdirSync(join(dir, 'transcripts', id), { recursive: true })
   writeFileSync(join(dir, 'runs', `${id}.json`), JSON.stringify(rec, null, 2) + '\n')
   for (const [name, text] of transcripts) writeFileSync(join(dir, 'transcripts', id, `${name}.jsonl`), text)
+  if (!pushRunsRepo(dir, `run ${id}: ${rec.status} ${rec.repo}#${plan.issue.number}`)) return console.log(`record: ${id} already recorded`)
+  console.log(`record: ${id} ${rec.status} verdict=${rec.verdict} stages=${stages.map((s) => `${stageName(s.agent, s.round)}:${s.transcript}`).join(',')} cost=${rec.costUsd ?? 'n/a'}`)
+}
 
-  const git = (...args: string[]) => sh('git', ['-C', dir, '-c', 'user.name=factory', '-c', 'user.email=factory@users.noreply.github.com', ...args])
+function cloneRunsRepo(token: string, owner: string): string {
+  const dir = runFile('runs-repo')
+  rmSync(dir, { recursive: true, force: true })
+  sh('git', ['clone', '--quiet', '--depth', '1', `https://x-access-token:${token}@github.com/${owner}/factory-runs.git`, dir])
+  return dir
+}
+
+// Commits everything in the runs clone and pushes it. Returns false when there was nothing new to push.
+function pushRunsRepo(dir: string, message: string): boolean {
+  const git = (...args: string[]) => sh('git', ['-C', dir, '-c', 'user.name=factory', '-c', `user.email=${FACTORY_EMAIL}`, ...args])
   git('add', '-A')
-  if (git('status', '--porcelain') === '') return console.log(`record: ${id} already recorded`)
-  git('commit', '--quiet', '-m', `run ${id}: ${rec.status} ${rec.repo}#${plan.issue.number}`)
-  // Each run writes only its own files, so a rebase onto another run's push never conflicts.
+  if (git('status', '--porcelain') === '') return false
+  git('commit', '--quiet', '-m', message)
+  // Every writer adds only its own files, so a rebase onto another writer's push never conflicts.
   for (let attempt = 1; ; attempt++) {
     const push = spawnSync('git', ['-C', dir, 'push', '--quiet', 'origin', 'HEAD'], { encoding: 'utf8' })
-    if (push.status === 0) break
-    if (attempt === 5) throw new Error(`record: push failed 5 times: ${push.stderr}`)
+    if (push.status === 0) return true
+    if (attempt === 5) throw new Error(`push to factory-runs failed 5 times: ${push.stderr}`)
     git('pull', '--quiet', '--rebase', 'origin', sh('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']))
   }
-  console.log(`record: ${id} ${rec.status} verdict=${rec.verdict} stages=${stages.map((s) => `${stageName(s.agent, s.round)}:${s.transcript}`).join(',')} cost=${rec.costUsd ?? 'n/a'}`)
+}
+
+// Scrubs a transcript and checks it with gitleaks. null means it must not be stored.
+function storable(raw: string): string | null {
+  const text = scrub(raw, secrets())
+  return text.length > 0 && !hasLeak(text) ? text : null
+}
+
+// What score-prepare leaves in each job dir for score-judge.
+type ScoreJob = { runId: string; scorer: string; task: string | null; sha: string }
+const scoreJobs = () => runFile('score')
+
+function scorePrepare() {
+  const token = env('FACTORY_GH_TOKEN')
+  const runsDir = cloneRunsRepo(token, env('GITHUB_REPOSITORY_OWNER'))
+  const scorers = [CORRECTNESS, ...loadAgents(scorersDir).map((j) => j.name)]
+  if (scorers.slice(1).includes(CORRECTNESS)) throw new Error(`scorers/${CORRECTNESS}.md: that name belongs to the built-in check`)
+  const existing = subdirs(join(runsDir, 'scores')).flatMap((id) => readdirSync(join(runsDir, 'scores', id)).map((f) => `scores/${id}/${f}`))
+  const pending = Map.groupBy(pendingScores(readRecords(runsDir), scorers, existing), (p) => p.run)
+  console.log(`score-prepare: ${[...pending.values()].flat().length} scores pending over ${pending.size} runs`)
+
+  const clones = new Map<string, string>()
+  for (const [run, jobs] of pending) {
+    try {
+      const repo = clones.get(run.repo) ?? runFile(`repos/${run.repo.replace('/', '__')}`)
+      if (!clones.has(run.repo)) {
+        rmSync(repo, { recursive: true, force: true })
+        sh('git', ['clone', '--quiet', `https://x-access-token:${token}@github.com/${run.repo}.git`, repo])
+        clones.set(run.repo, repo)
+      }
+      const git = (...args: string[]) => sh('git', ['-C', repo, ...args], { maxBuffer: 64 * 1024 * 1024 })
+      // The PR ref outlives a deleted branch. The graded tree is the factory's last commit, not later human commits.
+      git('fetch', '--quiet', 'origin', `pull/${run.prUrl!.split('/').pop()}/head`)
+      const sha = git('log', '-1', '--format=%H', `--author=${FACTORY_EMAIL}`, `${run.baseSha}..FETCH_HEAD`)
+      if (!sha) throw new Error('no factory commit on the PR')
+      const issue: { title: string; body: string } = JSON.parse(sh('gh', ['issue', 'view', String(run.issueNumber), '--repo', run.repo, '--json', 'title,body'],
+        { env: { ...process.env, GH_TOKEN: token } }))
+
+      for (const { scorer } of jobs) {
+        const dir = join(scoreJobs(), `${run.id}__${scorer}`)
+        if (existsSync(join(dir, 'job.json'))) continue
+        rmSync(dir, { recursive: true, force: true })
+        if (scorer === CORRECTNESS) {
+          mkdirSync(join(dir, 'tree'), { recursive: true })
+          sh('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', repo, sha, join(dir, 'tree')])
+        } else {
+          const evidence = join(dir, 'evidence')
+          mkdirSync(evidence, { recursive: true })
+          writeFileSync(join(evidence, 'issue.md'), `# ${issue.title}\n\n${splitBenchMarker(issue.body).body}\n`)
+          writeFileSync(join(evidence, 'diff.patch'), git('diff', run.baseSha, sha) + '\n')
+          writeFileSync(join(evidence, 'transcript.md'), transcriptMarkdown(run.stages.filter((s) => s.agent === 'implement').map((s) => {
+            const file = join(runsDir, 'transcripts', run.id, `${stageName(s.agent, s.round)}.jsonl`)
+            const stored = s.transcript === 'stored' && existsSync(file)
+            return { name: stageName(s.agent, s.round), steps: stored ? harnesses[s.harness].steps(readFileSync(file, 'utf8')) : null }
+          })))
+        }
+        writeJsonFile(join(dir, 'job.json'), { runId: run.id, scorer, task: run.task, sha } satisfies ScoreJob)
+      }
+      console.log(`score-prepare: ${run.id} ${run.repo}#${run.issueNumber} at ${sha.slice(0, 7)}: ${jobs.map((j) => j.scorer).join(', ')}`)
+    } catch (e) {
+      console.log(`score-prepare: warning: skipped ${run.id}: ${(e as Error).message.split('\n')[0]}`)
+    }
+  }
+  // These clones hold FACTORY_GH_TOKEN in their remote URL, and the next step must not see it.
+  for (const dir of [runsDir, runFile('repos')]) rmSync(dir, { recursive: true, force: true })
+}
+
+function scoreJudge() {
+  const judges = new Map(loadAgents(scorersDir).map((j) => [j.name, j]))
+  const factorySha = sh('git', ['-C', factoryDir, 'rev-parse', 'HEAD'])
+  for (const name of subdirs(scoreJobs())) {
+    const dir = join(scoreJobs(), name)
+    if (existsSync(join(dir, 'score.json')) || !existsSync(join(dir, 'job.json'))) continue
+    const job = readJsonFile<ScoreJob>(join(dir, 'job.json'))
+    const base = { runId: job.runId, scorer: job.scorer, sha: job.sha, factorySha }
+    try {
+      let score: Score
+      if (job.scorer === CORRECTNESS) {
+        const tree = join(dir, 'tree')
+        score = { ...base, ...gradeTree(tree, checkFile(job.task!), sandbox(tree)), at: new Date().toISOString(), judge: null }
+      } else {
+        const def = judges.get(job.scorer)
+        if (!def) throw new Error(`no scorers/${job.scorer}.md`)
+        const harness = def.defaultHarness
+        const run = runAgent(name, { harness, model: def.models[harness], prompt: def.prompt, mounts: [`${join(dir, 'evidence')}:/work:ro`], log: join(dir, 'judge') })
+        const pass = run.ok ? parseScore(run.transcript.finalText) : null
+        const text = run.transcript.finalText.trim()
+        score = {
+          ...base,
+          pass,
+          reason: !run.ok ? 'The judge did not finish.' : text.length > 2000 ? `${text.slice(0, 2000)}…` : text || 'The judge gave no reason.',
+          at: new Date().toISOString(),
+          judge: { harness, model: run.transcript.model ?? def.models[harness], billing: run.billing, costUsd: run.transcript.usage.costUsd, wallTimeS: run.wallTimeS },
+        }
+      }
+      writeJsonFile(join(dir, 'score.json'), score)
+      console.log(`score-judge: ${job.runId} ${job.scorer}: ${score.pass === null ? 'unknown' : score.pass ? 'pass' : 'fail'}`)
+    } catch (e) {
+      console.log(`score-judge: warning: ${job.runId} ${job.scorer} not scored: ${(e as Error).message.split('\n')[0]}`)
+      // The job stays pending for the next run, and the workflow shows it failed.
+      process.exitCode = 1
+    }
+  }
+}
+
+function scoreSave() {
+  const dir = cloneRunsRepo(env('FACTORY_GH_TOKEN'), env('GITHUB_REPOSITORY_OWNER'))
+  let saved = 0
+  for (const name of subdirs(scoreJobs())) {
+    const job = join(scoreJobs(), name)
+    if (!existsSync(join(job, 'score.json'))) continue
+    const score = readJsonFile<Score>(join(job, 'score.json'))
+    const target = join(dir, 'scores', score.runId, `${score.scorer}.json`)
+    // A score is never recomputed or overwritten.
+    if (existsSync(target)) continue
+    mkdirSync(dirname(target), { recursive: true })
+    const reason = scrub(score.reason, secrets())
+    writeJsonFile(target, { ...score, reason: hasLeak(reason) ? 'The reason was withheld because gitleaks flagged a possible secret in it.' : reason })
+    const transcript = existsSync(join(job, 'judge.jsonl')) ? storable(readFileSync(join(job, 'judge.jsonl'), 'utf8')) : null
+    if (transcript) writeFileSync(target.replace(/\.json$/, '.jsonl'), transcript)
+    saved++
+  }
+  if (!pushRunsRepo(dir, `scores: ${saved} new`)) return console.log('score-save: nothing new to save')
+  console.log(`score-save: pushed ${saved} scores`)
+}
+
+const benchCells = () => runFile('bench')
+
+function benchRun() {
+  const configs = parseConfigs(env('BENCH_CONFIGS'))
+  const known = subdirs(join(factoryDir, 'bench', 'tasks'))
+  const wanted = env('BENCH_TASKS').trim()
+  const tasks = wanted === 'all' ? known : wanted.split(',').map((t) => t.trim()).filter(Boolean)
+  const unknown = tasks.filter((t) => !known.includes(t))
+  if (unknown.length || !tasks.length) throw new Error(`unknown bench tasks: ${unknown.join(', ') || '(none given)'}; known: ${known.join(', ')}`)
+  const base = resolve(env('FACTORY_WORK_DIR'))
+  const baseSha = sh('git', ['-C', base, 'rev-parse', 'HEAD'])
+  const implement = loadAgent(agentsDir, 'implement')
+  const fixed = { benchId: env('BENCH_ID'), factoryRef: env('FACTORY_REF'), factorySha: sh('git', ['-C', factoryDir, 'rev-parse', 'HEAD']), baseSha }
+  mkdirSync(benchCells(), { recursive: true })
+  console.log(`bench-run: ${fixed.benchId}: ${tasks.length} tasks x ${configs.length} configs, implement.md at ${fixed.factoryRef} (${fixed.factorySha.slice(0, 7)}), base ${baseSha.slice(0, 7)}`)
+
+  for (const task of tasks) {
+    const { title, body } = parseTask(readFileSync(join(factoryDir, 'bench', 'tasks', task, 'task.md'), 'utf8'))
+    for (const config of configs) {
+      const cell = cellName(task, config)
+      if (existsSync(join(benchCells(), `${cell}.json`))) continue
+      try {
+        const work = join(benchCells(), cell, 'work')
+        const tree = join(benchCells(), cell, 'tree')
+        rmSync(join(benchCells(), cell), { recursive: true, force: true })
+        mkdirSync(tree, { recursive: true })
+        sh('rsync', ['-a', `${base}/`, `${work}/`])
+        const prompt = `${implement.prompt}\n\n## Issue: ${title}\n\n${body}`
+        const run = runAgent(cell, { ...config, prompt, mounts: [`${work}:/work`], log: join(benchCells(), cell) })
+        sh('rsync', ['-a', '--exclude=.git', `${work}/`, `${tree}/`])
+        const grade = gradeTree(tree, checkFile(task), sandbox(tree))
+        const result: Omit<BenchResult, 'transcript'> = {
+          ...fixed,
+          task,
+          harness: config.harness,
+          requestedModel: config.model,
+          model: run.transcript.model ?? config.model,
+          billing: run.billing,
+          pass: grade.pass,
+          checkOutput: grade.reason,
+          usage: run.transcript.usage,
+          costUsd: run.transcript.usage.costUsd,
+          wallTimeS: run.wallTimeS,
+          at: run.startedAt,
+        }
+        writeJsonFile(join(benchCells(), `${cell}.json`), result)
+        console.log(`bench-run: ${cell}: ${grade.pass === null ? 'unknown' : grade.pass ? 'pass' : 'fail'}`)
+      } catch (e) {
+        console.log(`bench-run: warning: ${cell} not run: ${(e as Error).message.split('\n')[0]}`)
+        process.exitCode = 1
+      }
+    }
+  }
+}
+
+function benchSave() {
+  const dir = cloneRunsRepo(env('FACTORY_GH_TOKEN'), env('GITHUB_REPOSITORY_OWNER'))
+  const files = existsSync(benchCells()) ? readdirSync(benchCells()).filter((f) => f.endsWith('.json')) : []
+  let saved = 0
+  for (const file of files) {
+    const result = readJsonFile<Omit<BenchResult, 'transcript'>>(join(benchCells(), file))
+    const target = join(dir, 'bench', result.benchId, file)
+    if (existsSync(target)) continue
+    mkdirSync(dirname(target), { recursive: true })
+    const raw = join(benchCells(), file.replace(/\.json$/, '.jsonl'))
+    const transcript = existsSync(raw) ? storable(readFileSync(raw, 'utf8')) : null
+    if (transcript) writeFileSync(target.replace(/\.json$/, '.jsonl'), transcript)
+    writeJsonFile(target, { ...result, transcript: transcript ? 'stored' : 'withheld' } satisfies BenchResult)
+    saved++
+  }
+  if (!pushRunsRepo(dir, `bench: ${saved} results`)) return console.log('bench-save: nothing new to save')
+  console.log(`bench-save: pushed ${saved} results`)
 }
 
 function readRecords(runsRepoDir: string): RunRecord[] {
   return readdirSync(join(runsRepoDir, 'runs'))
     .filter((f) => f.endsWith('.json'))
     .map((f) => JSON.parse(readFileSync(join(runsRepoDir, 'runs', f), 'utf8')))
+}
+
+// Files under <runs repo>/<kind>/<id>/*.json, such as scores/<runId>/<scorer>.json. A missing dir has none.
+function readNested<T>(runsRepoDir: string, kind: 'scores' | 'bench'): T[] {
+  const root = join(runsRepoDir, kind)
+  return subdirs(root).flatMap((id) => readdirSync(join(root, id)).filter((f) => f.endsWith('.json')).map((f) => readJsonFile<T>(join(root, id, f))))
 }
 
 function db(runsRepoDir: string) {
@@ -367,8 +614,18 @@ function db(runsRepoDir: string) {
     run_id TEXT REFERENCES runs(id), agent TEXT, round INTEGER, harness TEXT, model TEXT, billing TEXT, ok INTEGER, verdict TEXT,
     input_tokens INTEGER, cache_read_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, started_at TEXT, wall_time_s INTEGER,
     transcript TEXT, PRIMARY KEY (run_id, agent, round))`)
+  database.exec(`CREATE TABLE scores (
+    run_id TEXT REFERENCES runs(id), scorer TEXT, pass INTEGER, reason TEXT, sha TEXT, factory_sha TEXT, at TEXT,
+    judge_harness TEXT, judge_model TEXT, judge_billing TEXT, judge_cost_usd REAL, judge_wall_time_s INTEGER, PRIMARY KEY (run_id, scorer))`)
+  database.exec(`CREATE TABLE bench (
+    bench_id TEXT, task TEXT, harness TEXT, requested_model TEXT, model TEXT, factory_ref TEXT, factory_sha TEXT, base_sha TEXT,
+    billing TEXT, pass INTEGER, check_output TEXT, input_tokens INTEGER, cache_read_tokens INTEGER, output_tokens INTEGER,
+    cost_usd REAL, wall_time_s INTEGER, at TEXT, transcript TEXT, PRIMARY KEY (bench_id, task, harness, requested_model))`)
   const insertRun = database.prepare(`INSERT INTO runs VALUES (${Array(21).fill('?').join(', ')})`)
   const insertStage = database.prepare(`INSERT INTO stages VALUES (${Array(15).fill('?').join(', ')})`)
+  const insertScore = database.prepare(`INSERT INTO scores VALUES (${Array(12).fill('?').join(', ')})`)
+  const insertBench = database.prepare(`INSERT INTO bench VALUES (${Array(18).fill('?').join(', ')})`)
+  const bool = (b: boolean | null) => (b === null ? null : b ? 1 : 0)
   const records = readRecords(runsRepoDir)
   for (const r of records) {
     insertRun.run(r.id, r.startedAt, r.trigger, r.factorySha, r.kind, r.task, r.issueNumber, r.harness, r.model, r.repo, r.baseSha,
@@ -378,8 +635,18 @@ function db(runsRepoDir: string) {
         s.usage.cacheReadTokens, s.usage.outputTokens, s.usage.costUsd, s.startedAt, s.wallTimeS, s.transcript)
     }
   }
+  const scores = readNested<Score>(runsRepoDir, 'scores')
+  for (const s of scores) {
+    insertScore.run(s.runId, s.scorer, bool(s.pass), s.reason, s.sha, s.factorySha, s.at,
+      s.judge?.harness ?? null, s.judge?.model ?? null, s.judge?.billing ?? null, s.judge?.costUsd ?? null, s.judge?.wallTimeS ?? null)
+  }
+  const bench = readNested<BenchResult>(runsRepoDir, 'bench')
+  for (const b of bench) {
+    insertBench.run(b.benchId, b.task, b.harness, b.requestedModel, b.model, b.factoryRef, b.factorySha, b.baseSha, b.billing, bool(b.pass),
+      b.checkOutput, b.usage.inputTokens, b.usage.cacheReadTokens, b.usage.outputTokens, b.costUsd, b.wallTimeS, b.at, b.transcript)
+  }
   database.close()
-  console.log(`db: ${records.length} runs -> ${file}`)
+  console.log(`db: ${records.length} runs, ${scores.length} scores, ${bench.length} bench results -> ${file}`)
 }
 
 function report(runsRepoDir: string) {
@@ -416,8 +683,10 @@ function report(runsRepoDir: string) {
   }
 
   const file = join(runsRepoDir, 'report.html')
-  writeFileSync(file, renderReport({ generatedAt: new Date().toISOString(), rows, steps }))
-  console.log(`report: ${rows.length} runs -> ${file}`)
+  const scores = readNested<Score>(runsRepoDir, 'scores')
+  const bench = readNested<BenchResult>(runsRepoDir, 'bench')
+  writeFileSync(file, renderReport({ generatedAt: new Date().toISOString(), rows, steps, scores, bench }))
+  console.log(`report: ${rows.length} runs, ${scores.length} scores, ${bench.length} bench results -> ${file}`)
 }
 
 function runId() {
@@ -445,6 +714,11 @@ const commands: Record<string, () => void> = {
   review: () => review(round()),
   respond: () => respond(round()),
   record,
+  'score-prepare': scorePrepare,
+  'score-judge': scoreJudge,
+  'score-save': scoreSave,
+  'bench-run': benchRun,
+  'bench-save': benchSave,
   db: () => db(args[0] ?? '.'),
   report: () => report(args[0] ?? '.'),
 }

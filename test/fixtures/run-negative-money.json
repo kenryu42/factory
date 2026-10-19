@@ -1,0 +1,61 @@
+{
+  "id": "39242721467-1",
+  "startedAt": "2026-10-19T11:10:44.736Z",
+  "trigger": "issue#14",
+  "factorySha": "844065abe6575eaedda591277ce42e62d8b45126",
+  "kind": "implement",
+  "task": "negative-money",
+  "issueNumber": 14,
+  "harness": "pi",
+  "model": "deepseek/deepseek-v4-pro",
+  "repo": "kenryu42/factory-sandbox",
+  "baseSha": "226c94b271c2171da2bfdeac39542313240dea84",
+  "branch": "factory/issue-14-39242721467-1",
+  "prUrl": "https://github.com/kenryu42/factory-sandbox/pull/19",
+  "status": "pr_opened",
+  "verdict": "approve",
+  "stages": [
+    {
+      "agent": "implement",
+      "round": 0,
+      "harness": "pi",
+      "model": "deepseek/deepseek-v4-pro",
+      "billing": "api",
+      "ok": true,
+      "verdict": null,
+      "usage": {
+        "inputTokens": 4451,
+        "cacheReadTokens": 25600,
+        "outputTokens": 1395,
+        "costUsd": 0.01252592
+      },
+      "startedAt": "2026-10-19T11:10:44.736Z",
+      "wallTimeS": 19,
+      "transcript": "stored"
+    },
+    {
+      "agent": "review",
+      "round": 0,
+      "harness": "claude-code",
+      "model": "claude-sonnet-5-5",
+      "billing": "api",
+      "ok": true,
+      "verdict": "approve",
+      "usage": {
+        "inputTokens": 6614,
+        "cacheReadTokens": 45597,
+        "outputTokens": 355,
+        "costUsd": 0.0246417
+      },
+      "startedAt": "2026-10-19T11:11:12.592Z",
+      "wallTimeS": 8,
+      "transcript": "stored"
+    }
+  ],
+  "inputTokens": 11065,
+  "cacheReadTokens": 71197,
+  "outputTokens": 1750,
+  "costUsd": 0.03716762,
+  "wallTimeS": 27,
+  "runUrl": "https://github.com/kenryu42/factory-sandbox/actions/runs/39242721467"
+}

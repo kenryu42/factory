@@ -29,10 +29,7 @@ export function decide(event: any): Decision {
   const harness = harnessLabels[0] ?? null
   if (harness !== null && !isHarnessName(harness)) return { run: false, reason: `unknown harness label "harness:${harness}"` }
 
-  const raw: string = event.issue.body ?? ''
-  const task = raw.match(BENCH_MARKER)?.[1] ?? null
-  // The marker is bookkeeping for scorers, so agents never see it.
-  const body = raw.replace(BENCH_MARKER, '').trim()
+  const { task, body } = splitBenchMarker(event.issue.body ?? '')
   return {
     run: true,
     plan: {
@@ -48,6 +45,11 @@ export function decide(event: any): Decision {
       },
     },
   }
+}
+
+// The marker is bookkeeping for scorers, so agents and judges never see it.
+export function splitBenchMarker(raw: string): { task: string | null; body: string } {
+  return { task: raw.match(BENCH_MARKER)?.[1] ?? null, body: raw.replace(BENCH_MARKER, '').trim() }
 }
 
 // The approved plan is the owner's latest spec comment, as the owner left it. The marker alone proves nothing,
