@@ -137,24 +137,26 @@ export type QaCheck = {
   consoleErrors: string[]
   // Same-origin responses with a 4xx or 5xx status.
   failedRequests: { url: string; status: number }[]
-  // The full-page PNG, relative to the screenshots directory.
+  // The full-page JPEG, relative to the screenshots directory.
   screenshot: string | null
 }
 
 // What the QA browser writes to qa.json. setupError means the build failed or the server never answered.
 export type QaResult = { url: string; setupError: string | null; checks: QaCheck[] }
 
-// One round's QA in the run record.
+// One round's QA in the run record. The published tree's checks are compared with the same checks on the base
+// commit: only new failures fail the QA, fixed ones were failing on the base, and still failing ones fail on both.
 export type QaSummary = {
   round: number
   failed: boolean
+  // Why the published tree could not be checked, or why the base could not be, which leaves no failure to compare with.
   setupError: string | null
+  baseSetupError: string | null
   pages: number
   checks: number
-  overflow: number
-  consoleErrors: number
-  failedRequests: number
-  loadErrors: number
+  newFailures: number
+  fixed: number
+  stillFailing: number
 }
 
 export type RunRecord = {
