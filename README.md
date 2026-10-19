@@ -11,7 +11,7 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 3. `publish 0` posts the spec agent's plan as an issue comment, or copies the implement agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
 4. `qa 0` runs the visual QA when the base commit has `.factory/qa.json` (see [Visual QA](#visual-qa)). `review 0` runs the review agent on a copy of the published tree, with the issue, the plan, the diff, and the QA report and screenshots mounted read-only. It ends with `VERDICT: approve` or `VERDICT: request_changes`. `respond 0` posts the review on the pull request.
 5. When the review asks for changes, `agent 1` runs the implement agent again in the same work tree with the review in its prompt, `publish 1` pushes one more commit to the pull request, and `qa 1`, `review 1` and `respond 1` check and review it. There is never a second revise round.
-6. `record` scrubs each transcript, checks it with gitleaks, and pushes `runs/<id>.json`, `transcripts/<id>/<agent>-<round>.jsonl`, and each round's `qa/<id>/<round>/qa.json` and screenshots to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
+6. `record` scrubs each transcript, checks it with gitleaks, and pushes `runs/<id>.json`, `transcripts/<id>/<agent>-<round>.jsonl`, each round's `qa/<id>/<round>/qa.json` and screenshots, and the base commit's `qa/<id>/base.json` to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
 
 Every comment the factory posts is scrubbed of known secrets and checked with gitleaks first.
 
@@ -147,9 +147,15 @@ Agents and the review cannot see a browser. A target repo that serves a web app 
 }
 ```
 
-`qa <round>` reads this file from the base commit, so a change can never loosen the checks it is judged by. In the agent image, with no credentials, it runs `build` on a copy of the published tree, starts `serve`, and loads every page at every width in each color scheme. The container has network access because the build installs packages. For each load it records how far the document scrolls sideways and the three elements that stick out furthest, console errors, same-origin 4xx and 5xx responses, and a full-page PNG screenshot. A page's query string can put a client-rendered view into the state to check.
+`qa <round>` reads this file from the base commit, so a change can never loosen the checks it is judged by. In the agent image, with no credentials, it runs `build` on a copy of the published tree, starts `serve`, and loads every page at every width in each color scheme. The container has network access because the build installs packages. For each load it records how far the document scrolls sideways and the three elements that stick out furthest, console errors, same-origin 4xx and 5xx responses, and a full-page JPEG screenshot. A page's query string can put a client-rendered view into the state to check.
 
-Any overflow, console error, failed request, page that did not load, or failed build fails the QA. A failing QA makes the round's verdict `request_changes` whatever the review agent said, and the revise round gets the failures in its prompt. The review agent reads `/input/qa.md` and the screenshots in `/input/qa/`, and the PR comment for the round includes the QA summary.
+Once per run, the same checks also run on the base commit, so a change is judged only on what it broke. QA sorts each check into one of three groups:
+
+- **New failures** block approval. A check fails here when it passes on the base and fails now, or when it shows a console error, failed request URL, overflow, or load error that the base did not have.
+- **Fixed** checks failed on the base and pass now.
+- **Still failing** checks fail the same way on the base. They are reported but do not block, since the change did not cause them.
+
+A failed build of the published tree fails the QA. A failed build of the base does not, but with nothing to compare against, every failure counts as new. Any new failure makes the round's verdict `request_changes` whatever the review agent said, and the revise round gets the failures in its prompt. The review agent reads `/input/qa.md` and the screenshots in `/input/qa/`, with the base commit's screenshots for new and fixed checks in `/input/qa/base/`. The PR comment for the round includes the QA summary, and the run record keeps the counts per group. Implement agents can load pages in the same headless Chromium, since any `node` script in the image can import `playwright`.
 
 To run the browser integration test, build the image and set `FACTORY_QA_IT=1`:
 

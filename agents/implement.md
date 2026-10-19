@@ -11,6 +11,7 @@ Resolve the GitHub issue below. When an approved plan follows the issue, the rep
 - Make the smallest change that fully resolves the issue. Match the surrounding code style.
 - Run the project's existing tests and linters if they exist, and fix what you broke.
 - Add a test only when it would catch a regression a user would notice.
+- Headless Chromium is installed, and any `node` script can import `playwright`. When your change affects what a web app shows, build and serve it, load the affected pages at a phone width (360px) and a desktop width (1280px), and fix any page that scrolls sideways before you finish.
 - Do not commit, push, or create branches. The factory commits your working tree and opens the pull request.
 - Do not edit files under `.github/`. The factory rejects those changes.
 - When owner feedback follows, the working tree is the open pull request. Address every point the owner raised, and say in your summary how you handled each one.

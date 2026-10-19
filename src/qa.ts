@@ -67,78 +67,133 @@ const problems = (c: QaCheck) => [
   c.failedRequests.length > 0 && `${c.failedRequests.length} failed request${c.failedRequests.length === 1 ? '' : 's'}`,
 ].filter((p): p is string => !!p)
 
-export const qaFailed = (r: QaResult) => r.setupError !== null || r.checks.some((c) => problems(c).length > 0)
+// A check of the published tree next to the same check on the base commit. base is null when the base could not be checked.
+export type QaRow = { check: QaCheck; base: QaCheck | null }
 
-export function summarizeQa(round: number, r: QaResult): QaSummary {
-  const count = (pick: (c: QaCheck) => boolean) => r.checks.filter(pick).length
+// The published tree's QA against the base commit's. A new failure's check keeps only the problems the base lacked,
+// so a defect the change did not cause never blocks it.
+export type QaComparison = { head: QaResult; base: QaResult; newFailures: QaRow[]; fixed: QaRow[]; stillFailing: QaRow[] }
+
+const where = (c: QaCheck) => `${c.page} ${c.width} ${c.scheme}`
+
+function added(check: QaCheck, base: QaCheck | null): QaCheck {
+  if (!base) return check
+  const errors = new Set(base.consoleErrors)
+  const urls = new Set(base.failedRequests.map((f) => f.url))
   return {
-    round,
-    failed: qaFailed(r),
-    setupError: r.setupError,
-    pages: new Set(r.checks.map((c) => c.page)).size,
-    checks: r.checks.length,
-    overflow: count((c) => c.overflowPx > 0),
-    consoleErrors: count((c) => c.consoleErrors.length > 0),
-    failedRequests: count((c) => c.failedRequests.length > 0),
-    loadErrors: count((c) => c.loadError !== null),
+    ...check,
+    loadError: base.loadError ? null : check.loadError,
+    overflowPx: base.overflowPx > 0 ? 0 : check.overflowPx,
+    offenders: base.overflowPx > 0 ? [] : check.offenders,
+    consoleErrors: check.consoleErrors.filter((e) => !errors.has(e)),
+    failedRequests: check.failedRequests.filter((f) => !urls.has(f.url)),
   }
 }
 
-// A failing QA blocks approval whatever the review model said, so the revise round always sees the failures.
-export function reviewVerdict(modelVerdict: Verdict | null, qa: QaResult | null): Verdict | null {
+export function compareQa(base: QaResult, head: QaResult): QaComparison {
+  const before = new Map(base.setupError ? [] : base.checks.map((c) => [where(c), c]))
+  const q: QaComparison = { head, base, newFailures: [], fixed: [], stillFailing: [] }
+  for (const check of head.checks) {
+    const was = before.get(where(check)) ?? null
+    const fresh = added(check, was)
+    if (problems(fresh).length) q.newFailures.push({ check: fresh, base: was })
+    else if (problems(check).length) q.stillFailing.push({ check, base: was })
+    else if (was && problems(was).length) q.fixed.push({ check, base: was })
+  }
+  return q
+}
+
+export const qaFailed = (q: QaComparison) => q.head.setupError !== null || q.newFailures.length > 0
+
+// The base screenshots worth keeping: those of the checks whose outcome the change moved.
+export const baseShots = (q: QaComparison) =>
+  [...q.newFailures, ...q.fixed].map((r) => r.base?.screenshot).filter((s): s is string => !!s)
+
+export function summarizeQa(round: number, q: QaComparison): QaSummary {
+  return {
+    round,
+    failed: qaFailed(q),
+    setupError: q.head.setupError,
+    baseSetupError: q.base.setupError,
+    pages: new Set(q.head.checks.map((c) => c.page)).size,
+    checks: q.head.checks.length,
+    newFailures: q.newFailures.length,
+    fixed: q.fixed.length,
+    stillFailing: q.stillFailing.length,
+  }
+}
+
+// New QA failures block approval whatever the review model said, so the revise round always sees them.
+export function reviewVerdict(modelVerdict: Verdict | null, qa: QaComparison | null): Verdict | null {
   return qa && qaFailed(qa) ? 'request_changes' : modelVerdict
 }
 
-const MAX_FAILURES = 30
+const MAX_ROWS = 30
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
 const inline = (s: string) => clip(s.replace(/\s+/g, ' ').trim(), 300).replaceAll('`', "'")
 
-function headline(r: QaResult): string {
-  if (r.setupError) return `**QA failed**: it could not check any page. ${inline(r.setupError)}`
-  const s = summarizeQa(0, r)
-  const widths = [...new Set(r.checks.map((c) => c.width))].join(', ')
-  const schemes = [...new Set(r.checks.map((c) => c.scheme))].join(' and ')
-  const counts = `${s.overflow} scroll sideways, ${s.consoleErrors} have console errors, ${s.failedRequests} have failed requests, ${s.loadErrors} did not load`
-  return `**QA ${s.failed ? 'failed' : 'passed'}**: ${s.checks} checks of ${s.pages} pages at ${widths} px in ${schemes}: ${counts}.`
+function headline(q: QaComparison): string {
+  if (q.head.setupError) return `**QA failed**: it could not check any page. ${inline(q.head.setupError)}`
+  const s = summarizeQa(0, q)
+  const widths = [...new Set(q.head.checks.map((c) => c.width))].join(', ')
+  const schemes = [...new Set(q.head.checks.map((c) => c.scheme))].join(' and ')
+  const counts = `${s.newFailures} new failing, ${s.fixed} fixed, ${s.stillFailing} still failing as on the base commit`
+  const noBase = q.base.setupError ? ` The base commit could not be checked, so every failure counts as new: ${inline(q.base.setupError)}` : ''
+  return `**QA ${s.failed ? 'failed' : 'passed'}**: ${s.checks} checks of ${s.pages} pages at ${widths} px in ${schemes}: ${counts}.${noBase}`
 }
 
-function details(r: QaResult, shots: string | null): string {
-  if (r.setupError) return ''
-  const columns = [...new Map(r.checks.map((c) => [`${c.width} ${c.scheme}`, c])).keys()]
-  const rows = [...Map.groupBy(r.checks, (c) => c.page)].map(([page, checks]) => {
-    const cell = (col: string) => {
-      const c = checks.find((x) => `${x.width} ${x.scheme}` === col)
-      return c ? problems(c).join(', ') || 'ok' : ''
-    }
+function describe({ check: c, base }: QaRow, shots: string | null, withBase: boolean): string {
+  const now = problems(c)
+  const parts = [`- \`${c.page}\` at ${c.width}px ${c.scheme}: ${now.length ? now.join(', ') : `was ${problems(base!).join(', ')}`}.`]
+  if (c.offenders.length) parts.push(`Sticks out: ${c.offenders.map((o) => `\`${o.element}\` "${inline(clip(o.text, 60))}" (right edge ${o.right}px)`).join('; ')}.`)
+  for (const e of c.consoleErrors.slice(0, 3)) parts.push(`Console: \`${inline(e)}\`.`)
+  for (const f of c.failedRequests.slice(0, 3)) parts.push(`${f.status} \`${inline(f.url)}\`.`)
+  if (shots && c.screenshot) {
+    const before = withBase && base?.screenshot ? `, on the base commit \`${shots}base/${base.screenshot}\`` : ''
+    parts.push(`Screenshot: \`${shots}${c.screenshot}\`${before}.`)
+  }
+  return parts.join(' ')
+}
+
+function details(q: QaComparison, shots: string | null): string {
+  if (q.head.setupError) return ''
+  const cells = new Map([
+    ...q.newFailures.map((r) => [where(r.check), `new: ${problems(r.check).join(', ')}`] as const),
+    ...q.fixed.map((r) => [where(r.check), 'fixed'] as const),
+    ...q.stillFailing.map((r) => [where(r.check), `still: ${problems(r.check).join(', ')}`] as const),
+  ])
+  const columns = [...new Map(q.head.checks.map((c) => [`${c.width} ${c.scheme}`, c])).keys()]
+  const rows = [...Map.groupBy(q.head.checks, (c) => c.page)].map(([page, checks]) => {
+    const cell = (col: string) => (checks.some((c) => `${c.width} ${c.scheme}` === col) ? (cells.get(`${page} ${col}`) ?? 'ok') : '')
     return `| \`${page}\` | ${columns.map(cell).join(' | ')} |`
   })
   const table = [`| Page | ${columns.join(' | ')} |`, `|---|${columns.map(() => '---').join('|')}|`, ...rows].join('\n')
 
-  const failing = r.checks.filter((c) => problems(c).length > 0)
-  const lines = failing.slice(0, MAX_FAILURES).map((c) => {
-    const parts = [`- \`${c.page}\` at ${c.width}px ${c.scheme}: ${problems(c).join(', ')}.`]
-    if (c.offenders.length) parts.push(`Sticks out: ${c.offenders.map((o) => `\`${o.element}\` "${inline(clip(o.text, 60))}" (right edge ${o.right}px)`).join('; ')}.`)
-    for (const e of c.consoleErrors.slice(0, 3)) parts.push(`Console: \`${inline(e)}\`.`)
-    for (const f of c.failedRequests.slice(0, 3)) parts.push(`${f.status} \`${inline(f.url)}\`.`)
-    if (shots && c.screenshot) parts.push(`Screenshot: \`${shots}${c.screenshot}\`.`)
-    return parts.join(' ')
-  })
-  if (failing.length > MAX_FAILURES) lines.push(`- and ${failing.length - MAX_FAILURES} more failing checks.`)
-  return [table, lines.length ? `### Failures\n\n${lines.join('\n')}` : ''].filter(Boolean).join('\n\n')
+  const group = (title: string, list: QaRow[], withBase: boolean) => {
+    if (!list.length) return ''
+    const lines = list.slice(0, MAX_ROWS).map((r) => describe(r, shots, withBase))
+    if (list.length > MAX_ROWS) lines.push(`- and ${list.length - MAX_ROWS} more.`)
+    return `### ${title}\n\n${lines.join('\n')}`
+  }
+  return [
+    table,
+    group('New failures, which block approval', q.newFailures, true),
+    group('Fixed: failing on the base commit, passing now', q.fixed, true),
+    group('Still failing as on the base commit, not blocking', q.stillFailing, false),
+  ].filter(Boolean).join('\n\n')
 }
 
 // The QA report the review agent and the revise round read. shots prefixes each screenshot path; null leaves them out.
-export function qaMarkdown(r: QaResult, shots: string | null): string {
-  return [`## Visual QA`, headline(r), details(r, shots)].filter(Boolean).join('\n\n') + '\n'
+export function qaMarkdown(q: QaComparison, shots: string | null): string {
+  return [`## Visual QA`, headline(q), details(q, shots)].filter(Boolean).join('\n\n') + '\n'
 }
 
-// The QA section of the PR comment: the headline, with the table and failures folded away.
-export function qaComment(r: QaResult, shots: string): string {
-  const failed = qaFailed(r)
-  const body = details(r, shots)
+// The QA section of the PR comment: the headline, with the table and the failures folded away.
+export function qaComment(q: QaComparison, shots: string): string {
+  const body = details(q, shots)
   return [
     `### Visual QA`,
-    headline(r) + (failed ? ' QA failures block approval, so this round requests changes.' : ''),
+    headline(q) + (qaFailed(q) ? ' New QA failures block approval, so this round requests changes.' : ''),
     body && `<details><summary>Pages, widths and failures</summary>\n\n${body}\n\n</details>`,
   ].filter(Boolean).join('\n\n')
 }

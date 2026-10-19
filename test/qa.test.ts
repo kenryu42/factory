@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { parseQaConfig, qaComment, qaConfigAt, qaMarkdown, reviewVerdict, summarizeQa } from '../src/qa.ts'
+import { baseShots, compareQa, parseQaConfig, qaComment, qaConfigAt, qaMarkdown, reviewVerdict, summarizeQa } from '../src/qa.ts'
 import type { QaCheck, QaResult } from '../src/types.ts'
 
 const config = {
@@ -75,55 +75,93 @@ test('a repo that adds qa.json in the change itself gets no QA for that change',
 
 const ok = (page: string, width: number, scheme: 'light' | 'dark'): QaCheck => ({
   page, width, scheme, loadError: null, overflowPx: 0, offenders: [], consoleErrors: [], failedRequests: [],
-  screenshot: `${page.split('/').filter(Boolean).join('-') || 'index'}-${width}-${scheme}.png`,
+  screenshot: `${page.split('/').filter(Boolean).join('-') || 'index'}-${width}-${scheme}.jpg`,
 })
 const grid = (pages: string[]) => pages.flatMap((p) => [360, 1280].flatMap((w) => (['light', 'dark'] as const).map((s) => ok(p, w, s))))
+const result = (checks: QaCheck[], setupError: string | null = null): QaResult => ({ url: 'http://localhost:4321', setupError, checks })
+const at = (r: QaResult, page: string, width: number, scheme: string) => r.checks.find((c) => c.page === page && c.width === width && c.scheme === scheme)!
+const chip = { element: 'span.chip', text: '住民戸籍課 Resident and Family Register Division', right: 394 }
 
 test('a clean QA passes, and its report says so with no failures', () => {
-  const result: QaResult = { url: 'http://localhost:4321', setupError: null, checks: grid(['/', '/cities/']) }
-  assert.deepEqual(summarizeQa(0, result), {
-    round: 0, failed: false, setupError: null, pages: 2, checks: 8, overflow: 0, consoleErrors: 0, failedRequests: 0, loadErrors: 0,
+  const qa = compareQa(result(grid(['/', '/cities/'])), result(grid(['/', '/cities/'])))
+  assert.deepEqual(summarizeQa(0, qa), {
+    round: 0, failed: false, setupError: null, baseSetupError: null, pages: 2, checks: 8, newFailures: 0, fixed: 0, stillFailing: 0,
   })
-  const md = qaMarkdown(result, '/input/qa/')
-  assert.match(md, /\*\*QA passed\*\*: 8 checks of 2 pages at 360, 1280 px in light and dark/)
+  const md = qaMarkdown(qa, '/input/qa/')
+  assert.match(md, /\*\*QA passed\*\*: 8 checks of 2 pages at 360, 1280 px in light and dark: 0 new failing, 0 fixed, 0 still failing as on the base commit\./)
   assert.match(md, /\| `\/cities\/` \| ok \| ok \| ok \| ok \|/)
-  assert.doesNotMatch(md, /Failures/)
-  assert.equal(reviewVerdict('approve', result), 'approve')
+  assert.doesNotMatch(md, /###/)
+  assert.equal(reviewVerdict('approve', qa), 'approve')
 })
 
-test('overflow and console errors fail the QA, and the report names the offenders and screenshots', () => {
-  const checks = grid(['/', '/cities/kobe-city/'])
-  const wide = checks.find((c) => c.page === '/cities/kobe-city/' && c.width === 360 && c.scheme === 'dark')!
-  Object.assign(wide, { overflowPx: 34, offenders: [{ element: 'span.chip', text: '住民戸籍課 Resident and Family Register Division', right: 394 }] })
-  const broken = checks.find((c) => c.page === '/' && c.width === 1280 && c.scheme === 'light')!
-  broken.consoleErrors = ['TypeError: x is undefined']
-  broken.failedRequests = [{ url: 'http://localhost:4321/data.json', status: 404 }]
-  const result: QaResult = { url: 'http://localhost:4321', setupError: null, checks }
+test('the QA sorts failures into new, fixed and still failing against the base commit', () => {
+  const base = result(grid(['/', '/cities/kobe-city/']))
+  const head = result(grid(['/', '/cities/kobe-city/']))
+  Object.assign(at(base, '/', 360, 'light'), { overflowPx: 40, offenders: [chip] })
+  for (const r of [base, head]) Object.assign(at(r, '/cities/kobe-city/', 360, 'dark'), { overflowPx: 34, offenders: [chip] })
+  at(head, '/', 1280, 'light').consoleErrors = ['TypeError: x is undefined']
+  at(base, '/cities/kobe-city/', 1280, 'dark').failedRequests = [{ url: 'http://localhost:4321/old.json', status: 404 }]
+  at(head, '/cities/kobe-city/', 1280, 'dark').failedRequests = [
+    { url: 'http://localhost:4321/old.json', status: 404 },
+    { url: 'http://localhost:4321/data.json', status: 500 },
+  ]
+  const qa = compareQa(base, head)
 
-  assert.deepEqual(summarizeQa(1, result), {
-    round: 1, failed: true, setupError: null, pages: 2, checks: 8, overflow: 1, consoleErrors: 1, failedRequests: 1, loadErrors: 0,
+  assert.deepEqual(summarizeQa(1, qa), {
+    round: 1, failed: true, setupError: null, baseSetupError: null, pages: 2, checks: 8, newFailures: 2, fixed: 1, stillFailing: 1,
   })
-  const md = qaMarkdown(result, '/input/qa/')
-  assert.match(md, /\*\*QA failed\*\*: 8 checks of 2 pages .*: 1 scroll sideways, 1 have console errors, 1 have failed requests, 0 did not load\./)
-  assert.match(md, /\| `\/cities\/kobe-city\/` \| ok \| overflow 34px \| ok \| ok \|/)
-  assert.match(md, /- `\/cities\/kobe-city\/` at 360px dark: overflow 34px\. Sticks out: `span\.chip` "住民戸籍課 Resident and Family Register Division" \(right edge 394px\)\. Screenshot: `\/input\/qa\/cities-kobe-city-360-dark\.png`\./)
-  assert.match(md, /- `\/` at 1280px light: 1 console error, 1 failed request\. Console: `TypeError: x is undefined`\. 404 `http:\/\/localhost:4321\/data\.json`\./)
-  assert.doesNotMatch(qaMarkdown(result, null), /Screenshot:/)
-  assert.match(qaComment(result, 'qa/run-1/0/screenshots/'), /QA failures block approval, so this round requests changes\.\n\n<details>[\s\S]*`qa\/run-1\/0\/screenshots\/cities-kobe-city-360-dark\.png`[\s\S]*<\/details>$/)
+  const md = qaMarkdown(qa, '/input/qa/')
+  assert.match(md, /\*\*QA failed\*\*: 8 checks of 2 pages .*: 2 new failing, 1 fixed, 1 still failing as on the base commit\./)
+  assert.match(md, /\| `\/` \| fixed \| ok \| new: 1 console error \| ok \|/)
+  assert.match(md, /\| `\/cities\/kobe-city\/` \| ok \| still: overflow 34px \| ok \| new: 1 failed request \|/)
+  const section = (title: string) => md.split('### ').find((s) => s.startsWith(title))!
+  assert.match(section('New failures'), /- `\/` at 1280px light: 1 console error\. Console: `TypeError: x is undefined`\. Screenshot: `\/input\/qa\/index-1280-light\.jpg`, on the base commit `\/input\/qa\/base\/index-1280-light\.jpg`\./)
+  assert.match(section('New failures'), /- `\/cities\/kobe-city\/` at 1280px dark: 1 failed request\. 500 `http:\/\/localhost:4321\/data\.json`\. Screenshot/)
+  assert.doesNotMatch(section('New failures'), /old\.json/)
+  assert.match(section('Fixed'), /- `\/` at 360px light: was overflow 40px\. Screenshot: `\/input\/qa\/index-360-light\.jpg`, on the base commit `\/input\/qa\/base\/index-360-light\.jpg`\./)
+  assert.match(section('Still failing'), /- `\/cities\/kobe-city\/` at 360px dark: overflow 34px\. Sticks out: `span\.chip` "住民戸籍課 Resident and Family Register Division" \(right edge 394px\)\. Screenshot: `\/input\/qa\/cities-kobe-city-360-dark\.jpg`\.\n/)
+  assert.deepEqual(baseShots(qa).sort(), ['cities-kobe-city-1280-dark.jpg', 'index-1280-light.jpg', 'index-360-light.jpg'])
+  assert.doesNotMatch(qaMarkdown(qa, null), /Screenshot:/)
+  assert.match(qaComment(qa, 'qa/run-1/1/screenshots/'), /New QA failures block approval, so this round requests changes\.\n\n<details>[\s\S]*`qa\/run-1\/1\/screenshots\/base\/index-360-light\.jpg`[\s\S]*<\/details>$/)
 })
 
-test('a failing QA forces request_changes whatever the review model said', () => {
-  const result: QaResult = { url: 'http://localhost:4321', setupError: null, checks: grid(['/']) }
-  result.checks[0].overflowPx = 12
-  assert.equal(reviewVerdict('approve', result), 'request_changes')
-  assert.equal(reviewVerdict(null, result), 'request_changes')
+test('only new failures force request_changes; failures already on the base commit do not', () => {
+  const base = result(grid(['/']))
+  const head = result(grid(['/']))
+  for (const r of [base, head]) Object.assign(r.checks[0], { overflowPx: 12, consoleErrors: ['Hydration failed'] })
+  const preexisting = compareQa(base, head)
+  assert.equal(summarizeQa(0, preexisting).failed, false)
+  assert.equal(reviewVerdict('approve', preexisting), 'approve')
+  assert.doesNotMatch(qaComment(preexisting, 'shots/'), /block approval/)
+
+  head.checks[1].overflowPx = 8
+  const regressed = compareQa(base, head)
+  assert.equal(reviewVerdict('approve', regressed), 'request_changes')
+  assert.equal(reviewVerdict(null, regressed), 'request_changes')
   assert.equal(reviewVerdict('approve', null), 'approve')
   assert.equal(reviewVerdict(null, null), null)
 })
 
-test('a build that fails is a QA failure that says why', () => {
-  const result: QaResult = { url: 'http://localhost:4321', setupError: 'build exited with 1:\nerror: lockfile had changes', checks: [] }
-  assert.equal(summarizeQa(0, result).failed, true)
-  assert.equal(reviewVerdict('approve', result), 'request_changes')
-  assert.equal(qaMarkdown(result, '/input/qa/'), '## Visual QA\n\n**QA failed**: it could not check any page. build exited with 1: error: lockfile had changes\n')
+test('a published tree that fails to build blocks approval, whatever the base did', () => {
+  const head = result([], 'build exited with 1:\nerror: lockfile had changes')
+  for (const base of [result(grid(['/'])), result([], 'build exited with 1')]) {
+    const qa = compareQa(base, head)
+    assert.equal(summarizeQa(0, qa).failed, true)
+    assert.equal(reviewVerdict('approve', qa), 'request_changes')
+    assert.equal(qaMarkdown(qa, '/input/qa/'), '## Visual QA\n\n**QA failed**: it could not check any page. build exited with 1: error: lockfile had changes\n')
+  }
+})
+
+test('a base commit that fails to build blocks nothing itself, and every failure of the published tree counts as new', () => {
+  const base = result([], 'build exited with 1:\nerror: missing module')
+  const clean = compareQa(base, result(grid(['/'])))
+  assert.deepEqual(summarizeQa(0, clean), {
+    round: 0, failed: false, setupError: null, baseSetupError: 'build exited with 1:\nerror: missing module', pages: 1, checks: 4, newFailures: 0, fixed: 0, stillFailing: 0,
+  })
+  assert.match(qaMarkdown(clean, null), /The base commit could not be checked, so every failure counts as new: build exited with 1: error: missing module/)
+
+  const head = result(grid(['/']))
+  head.checks[0].overflowPx = 12
+  assert.equal(summarizeQa(0, compareQa(base, head)).newFailures, 1)
+  assert.equal(reviewVerdict('approve', compareQa(base, head)), 'request_changes')
 })

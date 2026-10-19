@@ -1,6 +1,6 @@
 // The visual QA, run with node inside the factory image as /opt/qa/qa.mjs (see docker/Dockerfile).
 // It builds and serves the tree in /work per /out/config.json (a QaConfig), loads every page at every width and
-// color scheme in headless Chromium, and writes /out/qa.json (a QaResult) and /out/screenshots/*.png.
+// color scheme in headless Chromium, and writes /out/qa.json (a QaResult) and /out/screenshots/*.jpg.
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -85,8 +85,8 @@ for (const page of config.pages) {
         if (res && res.status() >= 400) check.loadError = `HTTP ${res.status()}`
         await tab.evaluate(() => document.fonts.ready)
         Object.assign(check, await tab.evaluate(measure))
-        check.screenshot = `${slug(page)}-${width}-${scheme}.png`
-        await tab.screenshot({ path: `${OUT}/screenshots/${check.screenshot}`, fullPage: true })
+        check.screenshot = `${slug(page)}-${width}-${scheme}.jpg`
+        await tab.screenshot({ path: `${OUT}/screenshots/${check.screenshot}`, fullPage: true, type: 'jpeg', quality: 70 })
       } catch (e) {
         check.loadError ??= String(e.message ?? e).split('\n')[0]
       }

@@ -4,7 +4,7 @@
 //   preflight       check FACTORY_GH_TOKEN can push to the repo and factory-runs before any model is paid   (FACTORY_GH_TOKEN)
 //   agent <round>   round 0: the spec or implement agent (on the PR head for a revise run); round 1: implement again after a review asks for changes   (model key only)
 //   publish <round> post the plan, or copy the agent's tree into a fresh clone and open or update the PR   (FACTORY_GH_TOKEN)
-//   qa <round>      build, serve and load the published tree's pages in headless Chromium, when the base commit has .factory/qa.json   (nothing)
+//   qa <round>      build, serve and load the published tree's pages, and once per run the base commit's, in headless Chromium, when the base commit has .factory/qa.json   (nothing)
 //   review <round>  run the review agent on the tree that round published   (model key only)
 //   respond <round> post that review on the PR   (FACTORY_GH_TOKEN)
 //   record          push the run record and scrubbed transcripts   (FACTORY_GH_TOKEN)
@@ -39,7 +39,7 @@ import {
 } from './guard.ts'
 import { credential, harnesses } from './harnesses.ts'
 import { basis, findingsMarkdown, headline, patchProblems, type Evidence } from './improve.ts'
-import { qaComment, qaConfigAt, qaFailed, qaMarkdown, reviewVerdict, summarizeQa } from './qa.ts'
+import { baseShots, compareQa, qaComment, qaConfigAt, qaFailed, qaMarkdown, reviewVerdict, summarizeQa, type QaComparison } from './qa.ts'
 import { prOutcome, renderReport, type PrView, type ReportModel } from './report.ts'
 import {
   benchEvidence, benchSubject, CORRECTNESS, diffAndGrade, gradeTree, judgeEvidence, pendingBenchScores, pendingScores, scorePath, type JudgeEvidence,
@@ -47,7 +47,7 @@ import {
 import { scrub } from './scrub.ts'
 import {
   isHarnessName, type AgentName, type BenchResult, type Billing, type Feedback, type HarnessName, type Improvement, type ImprovementStatus, type Issue, type IssuePlan, type Plan, type RevisePlan, type RunKind,
-  type PublishResult, type QaResult, type ReportRow, type RunRecord, type RunStatus, type Score, type ScoreSubject, type StageResult, type StageRun, type Transcript,
+  type PublishResult, type QaConfig, type QaResult, type ReportRow, type RunRecord, type RunStatus, type Score, type ScoreSubject, type StageResult, type StageRun, type Transcript,
 } from './types.ts'
 
 // git commands here carry the factory token in the remote URL. On a self-hosted Mac, Homebrew git's system config
@@ -104,7 +104,11 @@ const stage = (agent: AgentName, round: number) => readJson<StageResult>(`${stag
 const published = (round: number) => readJson<PublishResult>(`publish-${round}.json`)
 // The agent a run is about. A revise run is the implement agent again, on the pull request's branch.
 const MAIN_AGENT: Record<RunKind, AgentName> = { spec: 'spec', implement: 'implement', revise: 'implement' }
-const qaResult = (round: number) => readJson<QaResult>(`qa-${round}/qa.json`)
+// A round's QA against the base commit's. null when the round ran no QA.
+function qaComparison(round: number): QaComparison | null {
+  const head = readJson<QaResult>(`qa-${round}/qa.json`)
+  return head && compareQa(readJson<QaResult>('qa-base/qa.json')!, head)
+}
 // A revise round runs only when the round before it pushed a commit and its review asked for changes.
 const revising = (plan: Plan, round: number) =>
   round > 0 && plan.kind !== 'spec' && !!published(round - 1)?.sha && stage('review', round - 1)?.verdict === 'request_changes'
@@ -251,7 +255,7 @@ function runStage(agent: AgentName, round: number, context: string, mounts: stri
     model: transcript.model ?? model,
     billing,
     ok,
-    verdict: agent === 'review' ? reviewVerdict(ok ? parseVerdict(transcript.finalText) : null, qaResult(round)) : null,
+    verdict: agent === 'review' ? reviewVerdict(ok ? parseVerdict(transcript.finalText) : null, qaComparison(round)) : null,
     usage: transcript.usage,
     startedAt,
     wallTimeS,
@@ -265,7 +269,7 @@ function runStage(agent: AgentName, round: number, context: string, mounts: stri
 const feedbackSection = (feedback: Feedback[]) => ['## Owner feedback on the pull request',
   ...feedback.map((f) => `### ${f.location ? `On \`${f.location}\`` : 'Comment'}\n\n${f.body}`)].join('\n\n')
 
-function implementContext(plan: Plan, review: string | null, qa: QaResult | null) {
+function implementContext(plan: Plan, review: string | null, qa: QaComparison | null) {
   return [
     issueSection(plan.issue),
     plan.spec && `## Approved plan\n\n${plan.spec}`,
@@ -288,7 +292,7 @@ function agent(round: number) {
   }
   if (!revising(plan, round)) return console.log(`agent ${round}: no revise round`)
   // The work tree still holds the previous round's change, so this round edits on top of it.
-  runStage('implement', round, implementContext(plan, stage('review', round - 1)!.finalText, qaResult(round - 1)), [`${work}:/work`], stage('implement', 0)!.baseSha)
+  runStage('implement', round, implementContext(plan, stage('review', round - 1)!.finalText, qaComparison(round - 1)), [`${work}:/work`], stage('implement', 0)!.baseSha)
 }
 
 type Target = { issue: Issue } | { pr: string }
@@ -395,20 +399,15 @@ function publishChange(plan: Plan, round: number) {
   done('pr_opened', `Opened ${prUrl}`, { branch, prUrl, sha })
 }
 
-// Runs the target repo's visual QA on a copy of the tree this round published. The config comes from the base
-// commit, never the agent's tree. The container gets no credentials; it has network because the build installs packages.
-function qa(round: number) {
-  const plan = readPlan()
-  if (plan.kind !== 'implement' || !published(round)?.sha) return console.log(`qa ${round}: round ${round} pushed nothing to check`)
-  const config = qaConfigAt(runFile('pub'), stage('implement', 0)!.baseSha)
-  if (!config) return console.log(`qa ${round}: the base commit has no .factory/qa.json`)
-  const out = runFile(`qa-${round}`)
-  const tree = runFile(`qa-${round}-tree`)
+// Builds, serves and checks one tree in the QA browser, writing <out>/qa.json and <out>/screenshots.
+// The container gets no credentials; it has network because the build installs packages.
+function runQaBrowser(config: QaConfig, out: string, fill: (tree: string) => void) {
+  const tree = `${out}-tree`
   for (const dir of [out, tree]) {
     rmSync(dir, { recursive: true, force: true })
     mkdirSync(dir)
   }
-  sh('rsync', ['-a', '--exclude=.git', `${runFile('pub')}/`, `${tree}/`])
+  fill(tree)
   writeJsonFile(join(out, 'config.json'), config)
   const [cmd, ...args] = [...docker([`${tree}:/work`, `${out}:/out`, `${join(factoryDir, 'src', 'qa-browser.mjs')}:/opt/qa/qa.mjs:ro`], []), 'node', '/opt/qa/qa.mjs']
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: QA_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 })
@@ -417,8 +416,38 @@ function qa(round: number) {
     const why = `the QA browser stopped (${r.status ?? r.signal ?? r.error?.message}) without a result: ${String(r.stderr ?? '').trim().split('\n').slice(-10).join('\n')}`
     writeJsonFile(join(out, 'qa.json'), { url: config.url, setupError: why, checks: [] } satisfies QaResult)
   }
-  const s = summarizeQa(round, qaResult(round)!)
-  console.log(`qa ${round}: ${s.failed ? 'failed' : 'passed'}: ${s.setupError?.split('\n')[0] ?? `${s.checks} checks of ${s.pages} pages, ${s.overflow} overflow, ${s.consoleErrors} console errors, ${s.failedRequests} failed requests, ${s.loadErrors} did not load`}`)
+}
+
+// Runs the target repo's visual QA on a copy of the tree this round published, and once per run on the base commit,
+// so only failures the change introduced count. The config comes from the base commit, never the agent's tree.
+function qa(round: number) {
+  const plan = readPlan()
+  if (plan.kind !== 'implement' || !published(round)?.sha) return console.log(`qa ${round}: round ${round} pushed nothing to check`)
+  const pub = runFile('pub')
+  const baseSha = stage('implement', 0)!.baseSha
+  const config = qaConfigAt(pub, baseSha)
+  if (!config) return console.log(`qa ${round}: the base commit has no .factory/qa.json`)
+  if (!existsSync(runFile('qa-base/qa.json'))) {
+    runQaBrowser(config, runFile('qa-base'), (tree) => {
+      sh('git', ['-C', pub, 'archive', '-o', `${tree}.tar`, baseSha])
+      sh('tar', ['-xf', `${tree}.tar`, '-C', tree])
+      rmSync(`${tree}.tar`)
+    })
+  }
+  runQaBrowser(config, runFile(`qa-${round}`), (tree) => sh('rsync', ['-a', '--exclude=.git', `${pub}/`, `${tree}/`]))
+  const s = summarizeQa(round, qaComparison(round)!)
+  const base = s.baseSetupError ? `; the base commit could not be checked: ${s.baseSetupError.split('\n')[0]}` : ''
+  console.log(`qa ${round}: ${s.failed ? 'failed' : 'passed'}: ${s.setupError?.split('\n')[0] ?? `${s.newFailures} new failing, ${s.fixed} fixed, ${s.stillFailing} still failing of ${s.checks} checks of ${s.pages} pages${base}`}`)
+}
+
+// The published tree's screenshots, and the base commit's for the checks the change moved, under <dir> and <dir>/base.
+function copyQaShots(round: number, q: QaComparison, dir: string) {
+  const shots = runFile(`qa-${round}/screenshots`)
+  if (existsSync(shots)) sh('rsync', ['-a', `${shots}/`, `${dir}/`])
+  const picked = baseShots(q)
+  if (!picked.length) return
+  mkdirSync(join(dir, 'base'), { recursive: true })
+  for (const name of picked) copyFileSync(runFile(`qa-base/screenshots/${name}`), join(dir, 'base', name))
 }
 
 function review(round: number) {
@@ -433,11 +462,11 @@ function review(round: number) {
   writeFileSync(join(input, 'issue.md'), `# Issue #${plan.issue.number}: ${plan.issue.title}\n\n${plan.issue.body}\n`)
   if (plan.spec) writeFileSync(join(input, 'plan.md'), `${plan.spec}\n`)
   if (plan.kind === 'revise') writeFileSync(join(input, 'feedback.md'), `${scrub(feedbackSection(plan.feedback), secrets())}\n`)
-  const checked = qaResult(round)
+  const checked = qaComparison(round)
   if (checked) {
     writeFileSync(join(input, 'qa.md'), qaMarkdown(checked, '/input/qa/'))
     mkdirSync(join(input, 'qa'))
-    if (existsSync(runFile(`qa-${round}/screenshots`))) sh('rsync', ['-a', `${runFile(`qa-${round}/screenshots`)}/`, `${join(input, 'qa')}/`])
+    copyQaShots(round, checked, join(input, 'qa'))
   }
   copyFileSync(runFile(`diff-${round}.patch`), join(input, 'diff.patch'))
   // The published tree without .git, whose remote URL holds the GitHub token. The review's edits land in this copy and are dropped.
@@ -450,7 +479,7 @@ function respond(round: number) {
   const prUrl = published(round)?.prUrl
   if (!result || !prUrl) return console.log(`respond ${round}: no review to post`)
   const text = result.ok && result.finalText.trim() ? result.finalText.trim() : 'The review agent did not finish successfully, so this round has no review.'
-  const checked = qaResult(round)
+  const checked = qaComparison(round)
   const qaSection = checked ? `\n\n${qaComment(checked, `factory-runs qa/${readPlan().runId}/${round}/screenshots/`)}` : ''
   post({ pr: prUrl }, `${text}${qaSection}\n\n---\nfactory review, round ${round}: **${result.verdict ?? 'no verdict'}**. ${about(result)}. [Run log](${runLink()})`)
   console.log(`respond ${round}: posted the review (${result.verdict ?? 'no verdict'}) on ${prUrl}`)
@@ -500,7 +529,7 @@ function record() {
     verdict: stages.findLast((s) => s.agent === 'review')?.verdict ?? null,
     stages,
     qa: [0, 1].flatMap((r) => {
-      const checked = qaResult(r)
+      const checked = qaComparison(r)
       return checked ? [summarizeQa(r, checked)] : []
     }),
     inputTokens: total((s) => s.usage.inputTokens),
@@ -516,13 +545,16 @@ function record() {
   mkdirSync(join(dir, 'transcripts', id), { recursive: true })
   writeFileSync(join(dir, 'runs', `${id}.json`), JSON.stringify(rec, null, 2) + '\n')
   for (const [name, text] of transcripts) writeFileSync(join(dir, 'transcripts', id, `${name}.jsonl`), text)
-  for (const { round } of rec.qa!) {
-    const target = join(dir, 'qa', id, String(round))
-    mkdirSync(target, { recursive: true })
-    const results = storable(readFileSync(runFile(`qa-${round}/qa.json`), 'utf8'))
-    if (results) writeFileSync(join(target, 'qa.json'), results)
-    if (existsSync(runFile(`qa-${round}/screenshots`))) sh('rsync', ['-a', `${runFile(`qa-${round}/screenshots`)}/`, `${join(target, 'screenshots')}/`])
+  const storeQa = (from: string, to: string) => {
+    const results = storable(readFileSync(runFile(from), 'utf8'))
+    if (results) writeFileSync(join(dir, 'qa', id, to), results)
   }
+  for (const { round } of rec.qa!) {
+    mkdirSync(join(dir, 'qa', id, String(round)), { recursive: true })
+    storeQa(`qa-${round}/qa.json`, `${round}/qa.json`)
+    copyQaShots(round, qaComparison(round)!, join(dir, 'qa', id, String(round), 'screenshots'))
+  }
+  if (rec.qa!.length) storeQa('qa-base/qa.json', 'base.json')
   if (!pushRunsRepo(dir, `run ${id}: ${rec.status} ${rec.repo}#${plan.issue.number}`)) return console.log(`record: ${id} already recorded`)
   console.log(`record: ${id} ${rec.status} verdict=${rec.verdict} stages=${stages.map((s) => `${stageName(s.agent, s.round)}:${s.transcript}`).join(',')} cost=${rec.costUsd ?? 'n/a'}`)
 }
