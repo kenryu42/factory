@@ -46,3 +46,44 @@ test('an empty transcript counts as failed with zero usage', () => {
     assert.equal(t.usage.outputTokens, 0)
   }
 })
+
+test('claude-code steps: the Edit call on math.js, its result, and the final message', () => {
+  const steps = harnesses['claude-code'].steps(fixture('claude-code'))
+  const edit = steps.findIndex((s) => s.kind === 'tool_call' && s.tool === 'Edit')
+  assert.ok(edit >= 0, 'has an Edit tool call')
+  const call = steps[edit]
+  assert.ok(call.kind === 'tool_call' && call.input.includes('/work/math.js') && call.input.includes('return a + b;'))
+  assert.deepEqual(steps[edit + 1], { kind: 'tool_result', output: 'The file /work/math.js has been updated successfully.', isError: false })
+  const last = steps.at(-1)!
+  assert.ok(last.kind === 'message' && /a \+ b/.test(last.text))
+  assert.equal(steps.filter((s) => s.kind === 'tool_call').length, 3)
+})
+
+test('codex steps: shell commands with their output and the file_change on math.js', () => {
+  const steps = harnesses.codex.steps(fixture('codex'))
+  assert.ok(steps.some((s) => s.kind === 'tool_call' && s.tool === 'shell' && s.input.includes('cat math.js')))
+  assert.ok(steps.some((s) => s.kind === 'tool_result' && s.output.includes('return a - b;') && !s.isError))
+  assert.ok(steps.some((s) => s.kind === 'tool_call' && s.tool === 'file_change' && s.input === 'update /work/math.js'))
+  const last = steps.at(-1)!
+  assert.ok(last.kind === 'message' && /^Fixed `add\(\)`/.test(last.text))
+})
+
+test('pi steps: the edit call, the failed git diff, and the final text', () => {
+  const steps = harnesses.pi.steps(fixture('pi'))
+  assert.ok(steps.some((s) => s.kind === 'tool_call' && s.tool === 'edit' && s.input.includes('/work/math.js') && s.input.includes('return a + b;')))
+  assert.ok(steps.some((s) => s.kind === 'tool_result' && s.isError && s.output.includes('Not a git repository')))
+  const last = steps.at(-1)!
+  assert.ok(last.kind === 'message' && /add\(\)` now returns `a \+ b`/.test(last.text))
+})
+
+test('steps hold readable text, never raw events or thinking', () => {
+  for (const [name, harness] of Object.entries(harnesses)) {
+    const steps = harness.steps(fixture(name))
+    assert.ok(steps.length > 0, `${name} has steps`)
+    for (const s of steps) {
+      const text = s.kind === 'message' ? s.text : s.kind === 'tool_call' ? s.input : s.output
+      assert.doesNotMatch(text, /^\s*\{"(type|id)"/, `${name} step is a raw JSON event`)
+    }
+    assert.ok(!steps.some((s) => s.kind === 'message' && /^The bug is obvious/.test(s.text)), `${name} leaks thinking`)
+  }
+})

@@ -32,7 +32,19 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 
 ## Query your runs
 
-Clone `factory-runs`, then build a SQLite database from its run files:
+Clone `factory-runs` next to this repo, pull the latest runs, and build the report:
+
+```sh
+git -C ../factory-runs pull
+node src/cli.ts report ../factory-runs
+open ../factory-runs/report.html
+```
+
+`report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by harness and status. Click a run to read its transcript as messages, tool calls, and tool results.
+
+The report asks GitHub for each PR's state through your `gh` login. A PR counts as reverted when a merged PR in the same repo says `Reverts <repo>#<number>`, which is what GitHub's Revert button writes. Human touches are the comments, reviews, and commits on the PR by the repo owner. Bots and the factory's own commits do not count. If `gh` cannot look up a PR, the report prints a warning and leaves that run's outcome blank.
+
+For your own queries, build a SQLite database from the run files:
 
 ```sh
 node src/cli.ts db ../factory-runs
@@ -40,6 +52,8 @@ sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) fro
 ```
 
 Codex runs record tokens but no cost, because Codex reports no price.
+
+Both commands write generated files into the `factory-runs` checkout. Do not commit `report.html` or `runs.sqlite`; add them to that repo's `.gitignore`.
 
 ## Develop
 

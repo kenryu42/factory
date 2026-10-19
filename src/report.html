@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Factory runs</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --text: #1d1d1b;
+    --muted: #6b6b66;
+    --line: #e4e3df;
+    --accent: #2f5fb3;
+    --bar: #9db3d9;
+    --code: #f1f0ec;
+    --ok: #2e7d4f;
+    --warn: #a16207;
+    --bad: #b42318;
+    --merged: #6941c6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615;
+      --panel: #1f1f1e;
+      --text: #e8e7e3;
+      --muted: #9a9993;
+      --line: #33332f;
+      --accent: #8ab0f0;
+      --bar: #3d5a8c;
+      --code: #2a2a28;
+      --ok: #6fcf97;
+      --warn: #e3b341;
+      --bad: #f28b82;
+      --merged: #b69cf6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .tile .label { color: var(--muted); font-size: 12px; }
+  .tile .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .breakdowns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 12px; margin-bottom: 24px; }
+  .bars td { padding: 3px 0; }
+  .bars td:first-child { padding-right: 12px; white-space: nowrap; }
+  .bars td:nth-child(2) { width: 100%; }
+  .bars td.num { padding-left: 12px; }
+  .bar { height: 8px; border-radius: 4px; background: var(--bar); }
+  table { border-collapse: collapse; width: 100%; }
+  .filters { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .runs th, .runs td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  .runs th { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--panel); position: sticky; top: 0; }
+  .runs th.num, .runs td.num { text-align: right; }
+  .runs tbody tr { cursor: pointer; }
+  .runs tbody tr:hover { background: var(--code); }
+  .runs tbody tr:last-child td { border-bottom: 0; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
+  .s-pr_opened, .o-open { color: var(--ok); }
+  .s-no_changes, .o-closed { color: var(--muted); }
+  .s-agent_failed, .s-publish_failed, .o-reverted { color: var(--bad); }
+  .s-blocked_secret, .s-blocked_workflow_change { color: var(--warn); }
+  .o-merged { color: var(--merged); }
+  .back { display: inline-block; margin-bottom: 12px; }
+  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 16px; margin-bottom: 16px; }
+  .meta .label { display: block; color: var(--muted); font-size: 12px; }
+  .steps { display: flex; flex-direction: column; gap: 10px; }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .step.message { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .step.call { margin-left: 24px; }
+  .step.result { margin-left: 48px; padding: 6px 14px; }
+  .step.result.error { border-color: var(--bad); }
+  .step .kind { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .step .kind b { color: var(--text); font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-weight: 600; }
+  .step.error .kind { color: var(--bad); }
+  pre { margin: 0; padding: 8px 10px; background: var(--code); border-radius: 6px; font: 12px/1.45 ui-monospace, 'SF Mono', Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  button.more { margin-top: 4px; font: inherit; font-size: 12px; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+  .notice { padding: 16px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="report-data">__REPORT_DATA__</script>
+<script>
+  const data = JSON.parse(document.getElementById('report-data').textContent)
+  const rows = data.rows.slice().sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+  const app = document.getElementById('app')
+  const filters = { harness: '', status: '' }
+
+  function h(tag, attrs, ...children) {
+    const el = document.createElement(tag)
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue
+      if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+      else el.setAttribute(k, v)
+    }
+    for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c)
+    return el
+  }
+  const link = (href, text) => (/^https:\/\//.test(href || '') ? h('a', { href, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation() }, text) : text)
+  const usd = (n) => (n === null || n === undefined ? 'n/a' : '$' + n.toFixed(n !== 0 && Math.abs(n) < 1 ? 4 : 2))
+  const date = (iso) => iso.slice(0, 16).replace('T', ' ')
+  const dur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`)
+  const label = (s) => s.replace(/_/g, ' ')
+  const issueNumber = (r) => (r.trigger.match(/^issue#(\d+)$/) || [])[1]
+  const prNumber = (url) => (url ? '#' + url.split('/').pop() : '')
+  const pill = (cls, text) => h('span', { class: 'pill ' + cls }, text)
+
+  function issueLink(r) {
+    const n = issueNumber(r)
+    return n ? link(`https://github.com/${r.repo}/issues/${n}`, `${r.repo}#${n}`) : `${r.repo} ${r.trigger}`
+  }
+
+  function tile(lbl, value) {
+    return h('div', { class: 'panel tile' }, h('div', { class: 'label' }, lbl), h('div', { class: 'value' }, value))
+  }
+
+  function bars(title, entries, fmt) {
+    const max = Math.max(...entries.map(([, v]) => v)) || 1
+    return h('div', { class: 'panel' }, h('h2', {}, title), h('table', { class: 'bars' }, h('tbody', {},
+      entries.map(([name, v, shown]) => h('tr', {},
+        h('td', {}, name),
+        h('td', {}, h('div', { class: 'bar', style: `width:${(v / max) * 100}%` })),
+        h('td', { class: 'num' }, shown ?? fmt(v)))))))
+  }
+
+  function summaryView() {
+    const s = data.summary
+    const avg = s.avgHumanTouches === null ? 'n/a' : s.avgHumanTouches.toFixed(1)
+    return [
+      h('div', { class: 'tiles' },
+        tile('Runs', String(s.runs)),
+        tile('PRs opened', String(s.prsOpened)),
+        tile('Total cost', usd(s.totalCostUsd)),
+        tile('Cost per PR', usd(s.costPerPrUsd)),
+        tile('Merged', String(s.merged)),
+        tile('Reverted', String(s.reverted)),
+        tile('Touches per PR', avg)),
+      h('div', { class: 'breakdowns' },
+        bars('Runs by status', Object.entries(s.byStatus).sort((a, b) => b[1] - a[1]).map(([k, v]) => [label(k), v]), String),
+        bars('Spend by harness', Object.entries(s.byHarness).map(([k, v]) => [k, v.costUsd ?? 0, `${usd(v.costUsd)} · ${v.runs} run${v.runs === 1 ? '' : 's'}`]), usd)),
+    ]
+  }
+
+  function select(key, values, all) {
+    return h('select', { onchange: (e) => { filters[key] = e.target.value; renderTable() } },
+      h('option', { value: '' }, all),
+      values.map((v) => h('option', { value: v, selected: filters[key] === v ? '' : null }, label(v))))
+  }
+
+  const tbody = h('tbody')
+  const count = h('span', { class: 'muted' })
+
+  function renderTable() {
+    const shown = rows.filter((r) => (!filters.harness || r.harness === filters.harness) && (!filters.status || r.status === filters.status))
+    count.textContent = `${shown.length} of ${rows.length} runs`
+    tbody.replaceChildren(...(shown.length ? shown.map((r) => h('tr', { onclick: () => { location.hash = 'run=' + encodeURIComponent(r.id) } },
+      h('td', { style: 'font-variant-numeric:tabular-nums' }, date(r.startedAt)),
+      h('td', {}, issueLink(r)),
+      h('td', {}, r.harness),
+      h('td', { class: 'muted' }, r.model),
+      h('td', {}, pill('s-' + r.status, label(r.status))),
+      h('td', {}, r.outcome ? pill('o-' + r.outcome, r.outcome) : h('span', { class: 'muted' }, r.prUrl ? 'unknown' : '')),
+      h('td', { class: 'num' }, r.humanTouches === null ? '' : String(r.humanTouches)),
+      h('td', { class: 'num' }, usd(r.costUsd)),
+      h('td', { class: 'num' }, dur(r.wallTimeS)),
+      h('td', {}, r.prUrl ? link(r.prUrl, prNumber(r.prUrl)) : ''))) : [h('tr', {}, h('td', { colspan: 10, class: 'empty' }, 'No runs match these filters.'))]))
+  }
+
+  function listView() {
+    const uniq = (key) => [...new Set(rows.map((r) => r[key]))].sort()
+    renderTable()
+    return [
+      ...summaryView(),
+      h('div', { class: 'filters' }, select('harness', uniq('harness'), 'All harnesses'), select('status', uniq('status'), 'All statuses'), count),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'runs' },
+        h('thead', {}, h('tr', {}, ['Started', 'Issue', 'Harness', 'Model', 'Status', 'Outcome', 'Touches', 'Cost', 'Wall time', 'PR']
+          .map((t) => h('th', { class: ['Touches', 'Cost', 'Wall time'].includes(t) ? 'num' : null }, t)))),
+        tbody)),
+    ]
+  }
+
+  function clamped(text) {
+    const lines = text.split('\n')
+    if (lines.length <= 8 && text.length <= 600) return h('pre', {}, text)
+    const short = lines.slice(0, 8).join('\n').slice(0, 600)
+    const pre = h('pre', {}, short)
+    let open = false
+    const btn = h('button', { class: 'more', type: 'button', onclick: () => {
+      open = !open
+      pre.textContent = open ? text : short
+      btn.textContent = open ? 'Show less' : `Show all ${lines.length} lines`
+    } }, `Show all ${lines.length} lines`)
+    return [pre, btn]
+  }
+
+  function stepView(s) {
+    if (s.kind === 'message') return h('div', { class: 'step message' }, s.text)
+    if (s.kind === 'tool_call') return h('div', { class: 'step call' }, h('div', { class: 'kind' }, 'Tool call ', h('b', {}, s.tool)), h('pre', {}, s.input))
+    return h('div', { class: 'step result' + (s.isError ? ' error' : '') }, h('div', { class: 'kind' }, s.isError ? 'Error' : 'Result'), clamped(s.output || '(no output)'))
+  }
+
+  function runView(id) {
+    const r = rows.find((x) => x.id === id)
+    const back = h('a', { class: 'back', href: '#' }, '← All runs')
+    if (!r) return [back, h('div', { class: 'panel notice' }, `No run with id ${id}.`)]
+    const steps = data.steps[id]
+    const field = (name, value) => h('div', {}, h('span', { class: 'label' }, name), value)
+    return [
+      back,
+      h('div', { class: 'panel', style: 'margin-bottom:16px' },
+        h('h1', { style: 'margin-bottom:12px' }, issueLink(r), h('span', { class: 'muted', style: 'font-weight:400' }, `  run ${r.id}`)),
+        h('div', { class: 'meta' },
+          field('Started', date(r.startedAt)),
+          field('Harness', `${r.harness} (${r.model})`),
+          field('Status', pill('s-' + r.status, label(r.status))),
+          field('Outcome', r.outcome ? pill('o-' + r.outcome, r.outcome) : r.prUrl ? 'unknown' : 'no PR'),
+          field('Human touches', r.humanTouches === null ? 'n/a' : String(r.humanTouches)),
+          field('Cost', usd(r.costUsd)),
+          field('Tokens in / cached / out', h('span', { style: 'font-variant-numeric:tabular-nums' }, `${r.inputTokens.toLocaleString()} / ${r.cacheReadTokens.toLocaleString()} / ${r.outputTokens.toLocaleString()}`)),
+          field('Wall time', dur(r.wallTimeS)),
+          field('Pull request', r.prUrl ? link(r.prUrl, prNumber(r.prUrl)) : 'none'),
+          field('Run log', link(r.runUrl, /^https:\/\//.test(r.runUrl) ? 'GitHub Actions' : r.runUrl)))),
+      steps
+        ? h('div', { class: 'steps' }, steps.length ? steps.map(stepView) : h('div', { class: 'panel notice' }, 'The transcript has no messages or tool calls.'))
+        : h('div', { class: 'panel notice' }, r.transcript === 'withheld'
+          ? 'The transcript was withheld because it still looked like it held a secret after scrubbing.'
+          : 'The transcript file is missing from this checkout.'),
+    ]
+  }
+
+  function route() {
+    const m = location.hash.match(/^#run=(.+)$/)
+    app.replaceChildren(
+      h('header', {}, h('h1', {}, 'Factory runs'), h('span', { class: 'muted' }, `Generated ${date(data.generatedAt)} UTC`)),
+      ...(m ? runView(decodeURIComponent(m[1])) : listView()))
+    window.scrollTo(0, 0)
+  }
+
+  window.addEventListener('hashchange', route)
+  route()
+</script>
+</body>
+</html>

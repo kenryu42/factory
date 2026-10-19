@@ -1,10 +1,11 @@
-import type { HarnessName, Transcript } from './types.ts'
+import type { HarnessName, Step, Transcript } from './types.ts'
 
 type Harness = {
   // Environment variables the harness reads its API key from. Only these enter the container.
   keyEnv: string[]
   command(model: string, prompt: string): string[]
   parse(jsonl: string): Transcript
+  steps(jsonl: string): Step[]
 }
 
 type Event = Record<string, any>
@@ -15,6 +16,20 @@ function events(jsonl: string): Event[] {
     .filter((line) => line.trim().startsWith('{'))
     .map((line) => JSON.parse(line))
 }
+
+// Tool arguments as `key: value` lines, so a reader sees the command or path, not a JSON object.
+function compact(input: unknown): string {
+  if (typeof input === 'string') return input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return JSON.stringify(input) ?? ''
+  return Object.entries(input)
+    .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join('\n')
+}
+
+const texts = (content: unknown): string =>
+  typeof content === 'string'
+    ? content
+    : ((content ?? []) as Event[]).filter((c) => c.type === 'text').map((c) => c.text).join('\n')
 
 const failed: Transcript = {
   ok: false,
@@ -46,6 +61,16 @@ export const harnesses: Record<HarnessName, Harness> = {
         },
       }
     },
+    steps(jsonl) {
+      return events(jsonl)
+        .filter((e) => e.type === 'assistant' || e.type === 'user')
+        .flatMap((e): Step[] => (e.message?.content ?? []).flatMap((c: Event): Step[] => {
+          if (c.type === 'text' && e.type === 'assistant') return [{ kind: 'message', text: c.text }]
+          if (c.type === 'tool_use') return [{ kind: 'tool_call', tool: c.name, input: compact(c.input) }]
+          if (c.type === 'tool_result') return [{ kind: 'tool_result', output: texts(c.content), isError: c.is_error === true }]
+          return []
+        }))
+    },
   },
 
   codex: {
@@ -74,6 +99,21 @@ export const harnesses: Record<HarnessName, Harness> = {
         },
       }
     },
+    steps(jsonl) {
+      return events(jsonl)
+        .filter((e) => e.type === 'item.completed')
+        .flatMap(({ item }): Step[] => {
+          if (item.type === 'agent_message') return [{ kind: 'message', text: item.text }]
+          if (item.type === 'command_execution') return [
+            { kind: 'tool_call', tool: 'shell', input: item.command },
+            { kind: 'tool_result', output: item.aggregated_output ?? '', isError: item.exit_code !== 0 },
+          ]
+          if (item.type === 'file_change') {
+            return [{ kind: 'tool_call', tool: 'file_change', input: item.changes.map((c: Event) => `${c.kind} ${c.path}`).join('\n') }]
+          }
+          return []
+        })
+    },
   },
 
   pi: {
@@ -98,6 +138,19 @@ export const harnesses: Record<HarnessName, Harness> = {
           costUsd: sum((u) => u.cost.total),
         },
       }
+    },
+    steps(jsonl) {
+      return events(jsonl)
+        .filter((e) => e.type === 'message_end')
+        .flatMap(({ message: m }): Step[] => {
+          if (m.role === 'toolResult') return [{ kind: 'tool_result', output: texts(m.content), isError: m.isError === true }]
+          if (m.role !== 'assistant') return []
+          return m.content.flatMap((c: Event): Step[] => {
+            if (c.type === 'text') return [{ kind: 'message', text: c.text }]
+            if (c.type === 'toolCall') return [{ kind: 'tool_call', tool: c.name, input: compact(c.arguments) }]
+            return []
+          })
+        })
     },
   },
 }

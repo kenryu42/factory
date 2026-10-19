@@ -4,6 +4,7 @@
 //   publish copy the agent's tree into a fresh clone, open a PR  (FACTORY_GH_TOKEN)
 //   record  push the run record and scrubbed transcript          (FACTORY_GH_TOKEN, keys for scrubbing)
 //   db      build runs.sqlite from a local factory-runs checkout
+//   report  build report.html from a local factory-runs checkout   (your gh login)
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,8 +13,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { loadAgent } from './agents.ts'
 import { decide } from './guard.ts'
 import { harnesses } from './harnesses.ts'
+import { prOutcome, renderReport, type PrView } from './report.ts'
 import { scrub } from './scrub.ts'
-import type { AgentResult, Plan, PublishResult, RunRecord } from './types.ts'
+import type { AgentResult, Plan, PublishResult, ReportRow, RunRecord, Step } from './types.ts'
 
 const SECRET_ENV = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'DEEPSEEK_API_KEY', 'FACTORY_GH_TOKEN']
 const AGENT_TIMEOUT_MS = 50 * 60 * 1000
@@ -233,6 +235,42 @@ function db(runsRepoDir: string) {
   console.log(`db: ${files.length} runs -> ${file}`)
 }
 
+function report(runsRepoDir: string) {
+  const records: RunRecord[] = readdirSync(join(runsRepoDir, 'runs'))
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(readFileSync(join(runsRepoDir, 'runs', f), 'utf8')))
+
+  const rows: ReportRow[] = records.map((r) => {
+    if (!r.prUrl) return { ...r, outcome: null, humanTouches: null }
+    try {
+      const pr: PrView = JSON.parse(sh('gh', ['pr', 'view', r.prUrl, '--json', 'state,mergedAt,comments,reviews,commits'], { maxBuffer: 64 * 1024 * 1024 }))
+      const ref = `${r.repo}#${r.prUrl.split('/').pop()}`
+      const reverted = pr.state === 'MERGED' &&
+        sh('gh', ['api', '-X', 'GET', 'search/issues', '-f', `q=repo:${r.repo} is:pr is:merged "Reverts ${ref}" in:body`, '-q', '.total_count']) !== '0'
+      return { ...r, ...prOutcome(r.repo, pr, reverted) }
+    } catch (e) {
+      console.log(`report: warning: could not look up ${r.prUrl}: ${(e as Error).message.split('\n')[0]}`)
+      return { ...r, outcome: null, humanTouches: null }
+    }
+  })
+
+  const steps: Record<string, Step[] | null> = {}
+  for (const r of records) {
+    const file = join(runsRepoDir, 'transcripts', `${r.id}.jsonl`)
+    steps[r.id] = null
+    if (r.transcript !== 'stored' || !existsSync(file)) continue
+    try {
+      steps[r.id] = harnesses[r.harness].steps(readFileSync(file, 'utf8'))
+    } catch (e) {
+      console.log(`report: warning: could not read the transcript of ${r.id}: ${(e as Error).message}`)
+    }
+  }
+
+  const file = join(runsRepoDir, 'report.html')
+  writeFileSync(file, renderReport({ generatedAt: new Date().toISOString(), rows, steps }))
+  console.log(`report: ${rows.length} runs -> ${file}`)
+}
+
 function runId() {
   return process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? '1'}` : `local-${Date.now()}`
 }
@@ -247,7 +285,7 @@ function runLink() {
 }
 
 const [command, ...args] = process.argv.slice(2)
-const commands: Record<string, () => void> = { guard, agent, publish, record, db: () => db(args[0] ?? '.') }
+const commands: Record<string, () => void> = { guard, agent, publish, record, db: () => db(args[0] ?? '.'), report: () => report(args[0] ?? '.') }
 if (!commands[command]) {
   console.error(`usage: node src/cli.ts <${Object.keys(commands).join('|')}>`)
   process.exit(2)

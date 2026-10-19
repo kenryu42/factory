@@ -80,3 +80,17 @@ export type RunRecord = {
   transcript: 'stored' | 'withheld'
   runUrl: string
 }
+
+// One readable entry of a transcript, as the report shows it.
+export type Step =
+  | { kind: 'message'; text: string }
+  | { kind: 'tool_call'; tool: string; input: string }
+  | { kind: 'tool_result'; output: string; isError: boolean }
+
+export type Outcome = 'open' | 'merged' | 'closed' | 'reverted'
+
+export type ReportRow = RunRecord & {
+  // null when unknown: the run opened no PR, or the GitHub lookup failed.
+  outcome: Outcome | null
+  humanTouches: number | null
+}
