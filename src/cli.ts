@@ -52,8 +52,11 @@ import {
 
 // git commands here carry the factory token in the remote URL. On a self-hosted Mac, Homebrew git's system config
 // adds the osxkeychain helper, which would copy that token into the owner's login Keychain on every clone and
-// fails outright while the Mac is locked. Every git child of this process runs with no credential helper.
-Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '', GIT_TERMINAL_PROMPT: '0' })
+// fails outright while the Mac is locked. In Actions every git child of this process runs with no credential helper.
+// Local commands such as propose push with the owner's own login, so they keep it.
+if (process.env.GITHUB_ACTIONS === 'true') {
+  Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '', GIT_TERMINAL_PROMPT: '0' })
+}
 
 const SECRET_ENV = [...Object.values(harnesses).flatMap((h) => h.credentials.map((c) => c.env)), 'FACTORY_GH_TOKEN']
 // Five stages at most, inside the job's 240-minute timeout.
