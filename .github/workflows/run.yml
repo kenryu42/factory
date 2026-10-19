@@ -59,6 +59,12 @@ jobs:
         uses: ./factory/.github/actions/tools
 
       - if: steps.guard.outputs.run == 'true'
+        name: Preflight
+        run: node factory/src/cli.ts preflight
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+
+      - if: steps.guard.outputs.run == 'true'
         name: Agent
         run: node factory/src/cli.ts agent 0
         env:

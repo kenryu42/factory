@@ -1,6 +1,7 @@
 // Each subcommand is one step of .github/workflows/run.yml. Steps share files in FACTORY_RUN_DIR,
 // and a step whose stage does not apply to this run does nothing.
 //   guard           decide whether the issue event starts a run, find the approved plan   (github.token)
+//   preflight       check FACTORY_GH_TOKEN can push to the repo and factory-runs before any model is paid   (FACTORY_GH_TOKEN)
 //   agent <round>   round 0: the spec or implement agent; round 1: implement again after a review asks for changes   (model key only)
 //   publish <round> post the plan, or copy the agent's tree into a fresh clone and open or update the PR   (FACTORY_GH_TOKEN)
 //   review <round>  run the review agent on the tree that round published   (model key only)
@@ -98,6 +99,17 @@ const revising = (plan: Plan, round: number) =>
 const usd = (n: number | null) => (n === null ? 'n/a' : `$${n.toFixed(2)}`)
 const about = (s: StageResult) => `\`${s.agent}\` on ${s.harness} (\`${s.model}\`), ${usd(s.usage.costUsd)}, ${s.wallTimeS}s`
 const issueSection = (issue: Issue) => `## Issue #${issue.number}: ${issue.title}\n\n${issue.body}`
+
+// The token's repository access is only exercised after the agent has run and been paid for, so prove it first.
+function preflight() {
+  const { issue } = readPlan()
+  const ghEnv = { ...process.env, GH_TOKEN: env('FACTORY_GH_TOKEN') }
+  for (const repo of [issue.repo, `${issue.repo.split('/')[0]}/factory-runs`]) {
+    const r = spawnSync('gh', ['api', `repos/${repo}`, '-q', '.permissions.push'], { encoding: 'utf8', env: ghEnv })
+    if (r.stdout.trim() !== 'true') throw new Error(`FACTORY_GH_TOKEN cannot reach ${repo}: add the repo to the token's repository access`)
+  }
+  console.log(`preflight: FACTORY_GH_TOKEN can push to ${issue.repo} and its factory-runs`)
+}
 
 function guard() {
   const decision = decide(JSON.parse(readFileSync(env('GITHUB_EVENT_PATH'), 'utf8')))
@@ -940,6 +952,7 @@ const round = () => {
 }
 const commands: Record<string, () => void> = {
   guard,
+  preflight,
   agent: () => agent(round()),
   publish: () => publish(round()),
   review: () => review(round()),
