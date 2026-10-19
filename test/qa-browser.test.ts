@@ -57,6 +57,8 @@ test('the QA step blocks on the page the change broke, not on what was broken be
     'site/about/index.html': page(`<h1>About</h1>${banner}`),
   })
   const baseSha = commit()
+  // The published clone's view of the default branch, where the QA config is read from.
+  git('update-ref', 'refs/remotes/origin/main', baseSha)
   write({
     '.factory/qa.json': qaConfig(['/']),
     'site/news/index.html': page(`<h1>News</h1>${banner}<img src="/missing.png" alt="">`),
@@ -64,7 +66,7 @@ test('the QA step blocks on the page the change broke, not on what was broken be
   })
   const sha = commit()
 
-  writeFileSync(join(run, 'plan.json'), JSON.stringify({ kind: 'implement', runId: 'it', issue: { repo: 'o/r', number: 1, title: 't', body: 'b' } }))
+  writeFileSync(join(run, 'plan.json'), JSON.stringify({ kind: 'implement', runId: 'it', baseBranch: 'main', issue: { repo: 'o/r', number: 1, title: 't', body: 'b' } }))
   writeFileSync(join(run, 'implement-0.json'), JSON.stringify({ baseSha }))
   writeFileSync(join(run, 'publish-0.json'), JSON.stringify({ status: 'pr_opened', branch: 'b', prUrl: 'u', sha }))
 

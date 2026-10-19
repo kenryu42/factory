@@ -422,11 +422,12 @@ function runQaBrowser(config: QaConfig, out: string, fill: (tree: string) => voi
 // so only failures the change introduced count. The config comes from the base commit, never the agent's tree.
 function qa(round: number) {
   const plan = readPlan()
-  if (plan.kind !== 'implement' || !published(round)?.sha) return console.log(`qa ${round}: round ${round} pushed nothing to check`)
+  if (plan.kind === 'spec' || !published(round)?.sha) return console.log(`qa ${round}: round ${round} pushed nothing to check`)
   const pub = runFile('pub')
   const baseSha = stage('implement', 0)!.baseSha
-  const config = qaConfigAt(pub, baseSha)
-  if (!config) return console.log(`qa ${round}: the base commit has no .factory/qa.json`)
+  // From the default branch, which the agent cannot change. A revise run's merge base can predate qa.json.
+  const config = qaConfigAt(pub, `origin/${plan.baseBranch}`)
+  if (!config) return console.log(`qa ${round}: ${plan.baseBranch} has no .factory/qa.json`)
   if (!existsSync(runFile('qa-base/qa.json'))) {
     runQaBrowser(config, runFile('qa-base'), (tree) => {
       sh('git', ['-C', pub, 'archive', '-o', `${tree}.tar`, baseSha])

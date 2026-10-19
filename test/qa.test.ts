@@ -165,3 +165,28 @@ test('a base commit that fails to build blocks nothing itself, and every failure
   assert.equal(summarizeQa(0, compareQa(base, head)).newFailures, 1)
   assert.equal(reviewVerdict('approve', compareQa(base, head)), 'request_changes')
 })
+
+// A revise run's base is the merge base of an older pull request, which can predate qa.json on the default branch.
+test('a revise run gets QA, with the config from the default branch', () => {
+  const { dir: origin, commit } = repo()
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim()
+  const base = commit({ 'index.html': '<h1>hi</h1>' })
+  git(origin, 'branch', 'factory/issue-1-x')
+  commit({ '.factory/qa.json': configText() })
+  git(origin, 'checkout', '--quiet', 'factory/issue-1-x')
+  const head = commit({ 'index.html': '<h1>hello</h1>' })
+  const run = mkdtempSync(join(tmpdir(), 'qa-revise-'))
+  git(run, 'clone', '--quiet', origin, 'pub')
+  git(join(run, 'pub'), 'checkout', '--quiet', head)
+  writeFileSync(join(run, 'plan.json'), JSON.stringify({ kind: 'revise', baseBranch: 'main', issue: { repo: 'o/r', number: 1, title: 't', body: '' } }))
+  writeFileSync(join(run, 'implement-0.json'), JSON.stringify({ baseSha: base }))
+  writeFileSync(join(run, 'publish-0.json'), JSON.stringify({ status: 'pr_updated', sha: head }))
+  const bin = join(run, 'bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'docker'), '#!/bin/sh\necho "no docker in this test" >&2\nexit 1\n', { mode: 0o755 })
+  const out = execFileSync('node', [join(import.meta.dirname, '..', 'src', 'cli.ts'), 'qa', '0'], {
+    encoding: 'utf8',
+    env: { ...process.env, FACTORY_RUN_DIR: run, PATH: `${bin}:${process.env.PATH}`, NODE_TEST_CONTEXT: '' },
+  })
+  assert.match(out, /^qa 0: failed: the QA browser stopped/m)
+})
