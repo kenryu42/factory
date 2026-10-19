@@ -106,6 +106,57 @@ export type PublishResult = {
   sha: string | null
 }
 
+export const COLOR_SCHEMES = ['light', 'dark'] as const
+export type ColorScheme = (typeof COLOR_SCHEMES)[number]
+
+// A target repo's .factory/qa.json, read from the base commit so the agent cannot weaken its own QA.
+export type QaConfig = {
+  // Shell commands run in the published tree: build to completion, then serve in the background.
+  build: string
+  serve: string
+  // Where serve listens. Each page is a path (with an optional query) under it.
+  url: string
+  pages: string[]
+  widths: number[]
+  schemes: ColorScheme[]
+}
+
+// An element whose right edge passes the viewport's: `tag.class` plus the start of its text.
+export type QaOffender = { element: string; text: string; right: number }
+
+// One page loaded at one width and color scheme.
+export type QaCheck = {
+  page: string
+  width: number
+  scheme: ColorScheme
+  // Why the page did not load, such as a timeout or a 404 response. null when it loaded.
+  loadError: string | null
+  // How far the document scrolls sideways past the viewport, in CSS pixels. 0 when it fits.
+  overflowPx: number
+  offenders: QaOffender[]
+  consoleErrors: string[]
+  // Same-origin responses with a 4xx or 5xx status.
+  failedRequests: { url: string; status: number }[]
+  // The full-page PNG, relative to the screenshots directory.
+  screenshot: string | null
+}
+
+// What the QA browser writes to qa.json. setupError means the build failed or the server never answered.
+export type QaResult = { url: string; setupError: string | null; checks: QaCheck[] }
+
+// One round's QA in the run record.
+export type QaSummary = {
+  round: number
+  failed: boolean
+  setupError: string | null
+  pages: number
+  checks: number
+  overflow: number
+  consoleErrors: number
+  failedRequests: number
+  loadErrors: number
+}
+
 export type RunRecord = {
   id: string
   startedAt: string
@@ -125,6 +176,8 @@ export type RunRecord = {
   // The last review's verdict.
   verdict: Verdict | null
   stages: StageRun[]
+  // One entry per round the visual QA ran in. Empty when the repo has no .factory/qa.json, and missing on older runs.
+  qa?: QaSummary[]
   // Totals over stages. costUsd is null only when no stage reported a price.
   inputTokens: number
   cacheReadTokens: number

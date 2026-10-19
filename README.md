@@ -9,9 +9,9 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 1. `guard` reads the label event. It starts a run only when the repo owner added `factory` or `factory:spec` to an issue the owner wrote, or `factory:revise` to a factory pull request (see [Ask for a revision](#ask-for-a-revision)). For `factory`, it also looks for the owner's latest spec comment on the issue and takes it as the approved plan.
 2. `agent 0` runs an agent inside the `docker/` image on a checkout of the target repo. The container gets one model credential and no GitHub token. For `factory:spec` it runs the spec agent on a read-only checkout; for `factory` it runs the implement agent with the issue and the approved plan.
 3. `publish 0` posts the spec agent's plan as an issue comment, or copies the implement agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
-4. `review 0` runs the review agent on a copy of the published tree, with the issue, the plan, and the diff mounted read-only. It ends with `VERDICT: approve` or `VERDICT: request_changes`. `respond 0` posts the review on the pull request.
-5. When the review asks for changes, `agent 1` runs the implement agent again in the same work tree with the review in its prompt, `publish 1` pushes one more commit to the pull request, and `review 1` and `respond 1` review it. There is never a second revise round.
-6. `record` scrubs each transcript, checks it with gitleaks, and pushes `runs/<id>.json` and `transcripts/<id>/<agent>-<round>.jsonl` to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
+4. `qa 0` runs the visual QA when the base commit has `.factory/qa.json` (see [Visual QA](#visual-qa)). `review 0` runs the review agent on a copy of the published tree, with the issue, the plan, the diff, and the QA report and screenshots mounted read-only. It ends with `VERDICT: approve` or `VERDICT: request_changes`. `respond 0` posts the review on the pull request.
+5. When the review asks for changes, `agent 1` runs the implement agent again in the same work tree with the review in its prompt, `publish 1` pushes one more commit to the pull request, and `qa 1`, `review 1` and `respond 1` check and review it. There is never a second revise round.
+6. `record` scrubs each transcript, checks it with gitleaks, and pushes `runs/<id>.json`, `transcripts/<id>/<agent>-<round>.jsonl`, and each round's `qa/<id>/<round>/qa.json` and screenshots to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
 
 Every comment the factory posts is scrubbed of known secrets and checked with gitleaks first.
 
@@ -94,6 +94,33 @@ It refuses a dirty working tree and any patch outside `agents/` and `scorers/`. 
 	The example runs on GitHub-hosted `ubuntu-latest`. To run on your own Mac, uncomment its `with:` block, which selects a self-hosted runner labeled `factory`. Do that only in repos where you alone can open pull requests, as GitHub's [security guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use) explains. The Mac needs Docker, git, and gh on the runner's PATH.
 4. In the target repo settings under **Actions**, set workflow permissions to read-only and require approval for workflows from all outside contributors.
 5. Create the labels `factory`, `factory:spec`, `factory:revise`, `harness:claude-code`, and `harness:pi`.
+6. Optionally, commit a `.factory/qa.json` to turn on the [visual QA](#visual-qa).
+
+## Visual QA
+
+Agents and the review cannot see a browser. A target repo that serves a web app can commit `.factory/qa.json` to have each published round loaded in headless Chromium before the review:
+
+```json
+{
+  "build": "bun install --frozen-lockfile && bun run build",
+  "serve": "bun run start -- --port 4321 --host 127.0.0.1",
+  "url": "http://localhost:4321",
+  "pages": ["/", "/cities/", "/arriving-in-japan/?municipality=kobe-city"],
+  "widths": [360, 390, 768, 1280],
+  "schemes": ["light", "dark"]
+}
+```
+
+`qa <round>` reads this file from the base commit, so a change can never loosen the checks it is judged by. In the agent image, with no credentials, it runs `build` on a copy of the published tree, starts `serve`, and loads every page at every width in each color scheme. The container has network access because the build installs packages. For each load it records how far the document scrolls sideways and the three elements that stick out furthest, console errors, same-origin 4xx and 5xx responses, and a full-page PNG screenshot. A page's query string can put a client-rendered view into the state to check.
+
+Any overflow, console error, failed request, page that did not load, or failed build fails the QA. A failing QA makes the round's verdict `request_changes` whatever the review agent said, and the revise round gets the failures in its prompt. The review agent reads `/input/qa.md` and the screenshots in `/input/qa/`, and the PR comment for the round includes the QA summary.
+
+To run the browser integration test, build the image and set `FACTORY_QA_IT=1`:
+
+```sh
+docker build -t factory-agent docker
+FACTORY_QA_IT=1 pnpm test
+```
 
 ## Query your runs
 
