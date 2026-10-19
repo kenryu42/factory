@@ -1,0 +1,16 @@
+# Copy to .github/workflows/factory.yml in any repo the factory should work on.
+# Then add the FACTORY_GH_TOKEN secret and at least one model key to that repo.
+name: factory
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  factory:
+    if: github.event.label.name == 'factory'
+    uses: kenryu42/factory/.github/workflows/run.yml@main
+    secrets: inherit

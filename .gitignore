@@ -1,0 +1,6 @@
+node_modules/
+.audit/
+# Reference material from the Warp talk. Not ours to publish.
+software-factory.md
+software-factory.mp4
+screenshots/

@@ -1,0 +1,82 @@
+# Called from a target repo's factory.yml (see examples/factory.yml).
+# Each step gets only the secrets it needs. The agent runs in a container that sees one model key and nothing else.
+name: factory run
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY: { required: false }
+      OPENAI_API_KEY: { required: false }
+      DEEPSEEK_API_KEY: { required: false }
+      FACTORY_GH_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: factory-${{ github.repository }}-${{ github.event.issue.number }}
+    env:
+      FACTORY_WORK_DIR: ${{ github.workspace }}/work
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: kenryu42/factory
+          ref: main
+          path: factory
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - id: guard
+        run: |
+          echo "FACTORY_RUN_DIR=$RUNNER_TEMP/factory-run" >> "$GITHUB_ENV"
+          FACTORY_RUN_DIR="$RUNNER_TEMP/factory-run" node factory/src/cli.ts guard
+
+      - if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v7
+        with:
+          path: work
+          persist-credentials: false
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Build agent image
+        run: docker build -q -t factory-agent factory/docker
+
+      - if: steps.guard.outputs.run == 'true'
+        name: Agent
+        run: node factory/src/cli.ts agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: always() && steps.guard.outputs.run == 'true'
+        name: Publish
+        run: node factory/src/cli.ts publish
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - if: always() && steps.guard.outputs.run == 'true'
+        name: Record
+        run: node factory/src/cli.ts record
+        env:
+          FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
