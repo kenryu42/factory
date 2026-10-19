@@ -13,7 +13,8 @@ jobs:
   factory:
     if: github.event.label.name == 'factory'
     uses: kenryu42/factory/.github/workflows/run.yml@main
-    # Leave runner out (GitHub-hosted) on repos that accept PRs from outside contributors. Self-hosted only where only you can open PRs.
-    with:
-      runner: '["self-hosted", "factory"]'
+    # Runs on GitHub-hosted runners. To run on your own Mac instead, uncomment the two lines below,
+    # but only in repos where you alone can open pull requests.
+    # with:
+    #   runner: '["self-hosted", "factory"]'
     secrets: inherit

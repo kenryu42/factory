@@ -27,7 +27,7 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 	Use keys made only for the factory, each with a hard spend limit. Never use a subscription login.
 3. Copy `examples/factory.yml` to `.github/workflows/factory.yml` in the target repo.
 
-	The example runs on a self-hosted runner labeled `factory`, so use it only on repos where only you can open PRs, as GitHub's [security guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use) explains. Delete the `with:` block to run on GitHub-hosted `ubuntu-latest` instead; a self-hosted machine needs Docker, git, and gh on the runner's PATH.
+	The example runs on GitHub-hosted `ubuntu-latest`. To run on your own Mac, uncomment its `with:` block, which selects a self-hosted runner labeled `factory`. Do that only in repos where you alone can open pull requests, as GitHub's [security guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use) explains. The Mac needs Docker, git, and gh on the runner's PATH.
 4. In the target repo settings under **Actions**, set workflow permissions to read-only and require approval for workflows from all outside contributors.
 5. Create the labels `factory`, `harness:claude-code`, and `harness:pi`.
 
