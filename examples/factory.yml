@@ -5,8 +5,10 @@ name: factory
 on:
   issues:
     types: [labeled]
-  # Labels on pull requests arrive as pull_request events, not issues events.
-  pull_request:
+  # Labels on pull requests arrive as pull request events, not issues events. pull_request_target runs this file
+  # from the default branch; pull_request would run it from the PR's test merge commit, which GitHub can leave
+  # stale, so a PR opened before this trigger existed would never start a revise.
+  pull_request_target:
     types: [labeled]
 
 permissions:
@@ -18,7 +20,9 @@ jobs:
   factory:
     if: >-
       (github.event_name == 'issues' && (github.event.label.name == 'factory' || github.event.label.name == 'factory:spec')) ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'factory:revise')
+      (github.event_name == 'pull_request_target' && github.event.label.name == 'factory:revise' &&
+        github.event.sender.login == github.repository_owner &&
+        github.event.pull_request.head.repo.full_name == github.repository)
     uses: kenryu42/factory/.github/workflows/run.yml@main
     # Runs on GitHub-hosted runners. To run on your own Mac instead, uncomment the two lines below,
     # but only in repos where you alone can open pull requests.

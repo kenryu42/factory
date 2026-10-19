@@ -52,7 +52,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       # So that adding factory:revise again asks for another revision.
-      - if: steps.guard.outputs.run == 'true' && github.event_name == 'pull_request'
+      - if: steps.guard.outputs.run == 'true' && github.event_name == 'pull_request_target'
         name: Remove the revise label
         run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/factory%3Arevise" --silent
         env:

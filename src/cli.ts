@@ -125,7 +125,7 @@ const ghPages = <T>(path: string): T[] =>
 
 function guard() {
   const event = JSON.parse(readFileSync(env('GITHUB_EVENT_PATH'), 'utf8'))
-  const decision = process.env.GITHUB_EVENT_NAME === 'pull_request' ? reviseDecision(event) : issueDecision(event)
+  const decision = process.env.GITHUB_EVENT_NAME === 'pull_request_target' ? reviseDecision(event) : issueDecision(event)
   if (!decision.run) {
     console.log(`skip: ${decision.reason}`)
     setOutput('run', 'false')
