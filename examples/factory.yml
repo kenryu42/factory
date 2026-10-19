@@ -13,4 +13,7 @@ jobs:
   factory:
     if: github.event.label.name == 'factory'
     uses: kenryu42/factory/.github/workflows/run.yml@main
+    # Leave runner out (GitHub-hosted) on repos that accept PRs from outside contributors. Self-hosted only where only you can open PRs.
+    with:
+      runner: '["self-hosted", "factory"]'
     secrets: inherit
