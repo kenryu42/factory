@@ -1,6 +1,6 @@
-import { benchSummary, calibration, scoreSummary } from './report.ts'
-import { CHECK_FILE, CORRECTNESS, fenced } from './score.ts'
-import { HARNESS_NAMES, type BenchResult, type Improvement, type RunRecord, type Score } from './types.ts'
+import { benchSummary, calibration, passRate, scoreSummary } from './report.ts'
+import { benchSubject, CHECK_FILE, CORRECTNESS, fenced, scoredRun } from './score.ts'
+import { HARNESS_NAMES, type BenchResult, type Improvement, type RunRecord, type Score, type ScoreSubject } from './types.ts'
 
 // What the improve agent learns from: everything in factory-runs, plus the final text of each run's last review.
 export type Evidence = { records: RunRecord[]; scores: Score[]; bench: BenchResult[]; reviews: Record<string, string> }
@@ -47,13 +47,19 @@ export function checkSummary(output: string): string {
 export function findingsMarkdown(e: Evidence): string {
   const runs = new Map(e.records.map((r) => [r.id, r]))
   const implement = e.records.filter((r) => r.kind === 'implement')
-  const correctness = new Map(e.scores.filter((s) => s.scorer === CORRECTNESS).map((s) => [s.runId, s.pass]))
+  const correctness = new Map(e.scores.filter((s) => s.scorer === CORRECTNESS).map((s) => [scoredRun(s), s.pass]))
   const b = basis(e)
   const runLine = (id: string) => {
     const r = runs.get(id)
     if (!r) return `run \`${id}\` (no record)`
     return [`run \`${id}\``, r.task && `task \`${r.task}\``, `${r.harness} \`${r.model}\``, r.verdict && `final review ${r.verdict}`, usd(r.costUsd)]
       .filter(Boolean).join(' · ')
+  }
+  const cells = new Map(e.bench.map((c) => [`${c.benchId}/${benchSubject(c).cell}`, c]))
+  const subjectLine = (s: ScoreSubject) => {
+    if (s.kind === 'run') return runLine(s.runId)
+    const c = cells.get(`${s.benchId}/${s.cell}`)
+    return c ? `benchmark \`${s.benchId}\` · task \`${c.task}\` · ${c.harness}:${c.requestedModel} · ${usd(c.costUsd)}` : `benchmark \`${s.benchId}\` cell \`${s.cell}\` (no result)`
   }
 
   const sections: string[] = [
@@ -96,17 +102,18 @@ export function findingsMarkdown(e: Evidence): string {
     ].join('\n'),
   ].join('\n\n'))
 
-  const benches = benchSummary(e.bench)
+  const benches = benchSummary(e.bench, e.scores)
   for (const bench of benches) {
-    sections.push(`## Benchmark ${bench.benchId}\n\nimplement.md at ${bench.factoryRef} (${bench.factorySha.slice(0, 7)}).\n\n${table(['Config', 'Tasks', 'Pass rate', 'Avg cost'],
-      bench.configs.map((c) => [`${c.harness}:${c.model}`, c.tasks, pct(c.passRate), usd(c.avgCostUsd)]))}`)
+    const judges = [...new Set(bench.configs.flatMap((c) => Object.keys(c.judges)))].sort()
+    sections.push(`## Benchmark ${bench.benchId}\n\nimplement.md at ${bench.factoryRef} (${bench.factorySha.slice(0, 7)}).\n\n${table(['Config', 'Tasks', 'Pass rate', ...judges, 'Avg cost'],
+      bench.configs.map((c) => [`${c.harness}:${c.model}`, c.tasks, pct(c.passRate), ...judges.map((j) => pct(c.judges[j] ? passRate(c.judges[j]) : null)), usd(c.avgCostUsd)]))}`)
   }
 
   const missed = implement.filter((r) => r.verdict === 'approve' && correctness.get(r.id) === false)
   if (missed.length) {
     sections.push(`## The review approved a change that failed correctness (${missed.length})\n\n${capped(missed, (r) => {
       const review = e.reviews[r.id]
-      const check = e.scores.find((s) => s.runId === r.id && s.scorer === CORRECTNESS)!
+      const check = e.scores.find((s) => scoredRun(s) === r.id && s.scorer === CORRECTNESS)!
       return `- ${runLine(r.id)}\n  Check: ${checkSummary(check.reason)}.\n  The last review's final text:\n\n${review ? fenced(clip(review.trim(), MAX_REVIEW)) : '(transcript not stored)'}`
     })}`)
   }
@@ -114,8 +121,8 @@ export function findingsMarkdown(e: Evidence): string {
   const failing = Map.groupBy(e.scores.filter((s) => s.pass === false), (s) => s.scorer)
   for (const [scorer, fails] of [...failing].sort(([a], [b]) => Number(b === CORRECTNESS) - Number(a === CORRECTNESS) || a.localeCompare(b))) {
     sections.push(`## Failing ${scorer} scores (${fails.length})\n\n${capped(fails, (s) => scorer === CORRECTNESS
-      ? `- ${runLine(s.runId)}\n  Check: ${checkSummary(s.reason)}.`
-      : `- ${runLine(s.runId)}\n  The judge's reason:\n\n${fenced(clip(s.reason.trim(), MAX_REASON))}`)}`)
+      ? `- ${subjectLine(s.subject)}\n  Check: ${checkSummary(s.reason)}.`
+      : `- ${subjectLine(s.subject)}\n  The judge's reason:\n\n${fenced(clip(s.reason.trim(), MAX_REASON))}`)}`)
   }
 
   for (const bench of benches) {

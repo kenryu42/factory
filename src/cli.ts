@@ -7,12 +7,12 @@
 //   respond <round> post that review on the PR   (FACTORY_GH_TOKEN)
 //   record          push the run record and scrubbed transcripts   (FACTORY_GH_TOKEN)
 // .github/workflows/score.yml grades recorded runs:
-//   score-prepare   find unscored runs and write one job dir per (run, scorer) with the evidence   (FACTORY_GH_TOKEN)
+//   score-prepare   find unscored runs and bench cells and write one job dir per (subject, scorer) with the evidence   (FACTORY_GH_TOKEN)
 //   score-judge     run the correctness check and the judges in each job dir   (model keys only)
 //   score-save      push the scores and scrubbed judge transcripts   (FACTORY_GH_TOKEN)
 // .github/workflows/bench.yml replays bench tasks across harness:model configs:
-//   bench-run       run the implement agent on each task x config and grade the tree   (model keys only)
-//   bench-save      push the results and scrubbed transcripts   (FACTORY_GH_TOKEN)
+//   bench-run       run the implement agent on each task x config, keep its diff, and grade the tree   (model keys only)
+//   bench-save      push the results, scrubbed transcripts and diffs   (FACTORY_GH_TOKEN)
 // .github/workflows/improve.yml asks the improve agent for a change to the factory's own prompts:
 //   improve-prepare write findings.md from factory-runs and keep a copy of the untouched factory checkout   (FACTORY_GH_TOKEN)
 //   improve-run     run the improve agent on the factory checkout with findings.md   (model keys only)
@@ -34,11 +34,13 @@ import { approvedSpec, decide, splitBenchMarker, SPEC_MARKER, type IssueComment 
 import { credential, harnesses } from './harnesses.ts'
 import { basis, findingsMarkdown, headline, patchProblems, type Evidence } from './improve.ts'
 import { prOutcome, renderReport, type PrView, type ReportModel } from './report.ts'
-import { CORRECTNESS, gradeTree, pendingScores, transcriptMarkdown } from './score.ts'
+import {
+  benchEvidence, benchSubject, CORRECTNESS, diffAndGrade, gradeTree, judgeEvidence, pendingBenchScores, pendingScores, scorePath, type JudgeEvidence,
+} from './score.ts'
 import { scrub } from './scrub.ts'
 import {
   isHarnessName, type AgentName, type BenchResult, type Billing, type HarnessName, type Improvement, type ImprovementStatus, type Issue, type Plan,
-  type PublishResult, type ReportRow, type RunRecord, type RunStatus, type Score, type StageResult, type StageRun, type Transcript,
+  type PublishResult, type ReportRow, type RunRecord, type RunStatus, type Score, type ScoreSubject, type StageResult, type StageRun, type Transcript,
 } from './types.ts'
 
 const SECRET_ENV = [...Object.values(harnesses).flatMap((h) => h.credentials.map((c) => c.env)), 'FACTORY_GH_TOKEN']
@@ -48,7 +50,8 @@ const AGENT_TIMEOUT_MS = 40 * 60 * 1000
 const factoryDir = resolve(dirname(new URL(import.meta.url).pathname), '..')
 const agentsDir = join(factoryDir, 'agents')
 const scorersDir = join(factoryDir, 'scorers')
-const checkFile = (task: string) => join(factoryDir, 'bench', 'tasks', task, 'check.test.js')
+const tasksDir = join(factoryDir, 'bench', 'tasks')
+const checkFile = (task: string) => join(tasksDir, task, 'check.test.js')
 const FACTORY_EMAIL = 'factory@users.noreply.github.com'
 const image = () => process.env.FACTORY_IMAGE ?? 'factory-agent'
 const env = (name: string) => {
@@ -408,7 +411,7 @@ function storable(raw: string): string | null {
 }
 
 // What score-prepare leaves in each job dir for score-judge.
-type ScoreJob = { runId: string; scorer: string; task: string | null; sha: string }
+type ScoreJob = { subject: ScoreSubject; scorer: string; task: string | null; sha: string }
 const scoreJobs = () => runFile('score')
 
 function scorePrepare() {
@@ -416,9 +419,11 @@ function scorePrepare() {
   const runsDir = cloneRunsRepo(token, env('GITHUB_REPOSITORY_OWNER'))
   const scorers = [CORRECTNESS, ...loadAgents(scorersDir).map((j) => j.name)]
   if (scorers.slice(1).includes(CORRECTNESS)) throw new Error(`scorers/${CORRECTNESS}.md: that name belongs to the built-in check`)
-  const existing = subdirs(join(runsDir, 'scores')).flatMap((id) => readdirSync(join(runsDir, 'scores', id)).map((f) => `scores/${id}/${f}`))
+  const existing = scoreFiles(runsDir)
   const pending = Map.groupBy(pendingScores(readRecords(runsDir), scorers, existing), (p) => p.run)
-  console.log(`score-prepare: ${[...pending.values()].flat().length} scores pending over ${pending.size} runs`)
+  const benchPending = Map.groupBy(pendingBenchScores(readNested<BenchResult>(runsDir, 'bench'), scorers, existing), (p) => p.cell)
+  console.log(`score-prepare: ${[...pending.values()].flat().length} scores pending over ${pending.size} runs, ` +
+    `${[...benchPending.values()].flat().length} over ${benchPending.size} bench cells`)
 
   const clones = new Map<string, string>()
   for (const [run, jobs] of pending) {
@@ -437,33 +442,62 @@ function scorePrepare() {
       const issue: { title: string; body: string } = JSON.parse(sh('gh', ['issue', 'view', String(run.issueNumber), '--repo', run.repo, '--json', 'title,body'],
         { env: { ...process.env, GH_TOKEN: token } }))
 
+      const subject: ScoreSubject = { kind: 'run', runId: run.id }
       for (const { scorer } of jobs) {
-        const dir = join(scoreJobs(), `${run.id}__${scorer}`)
-        if (existsSync(join(dir, 'job.json'))) continue
-        rmSync(dir, { recursive: true, force: true })
+        const dir = scoreJobDir(subject, scorer)
+        if (!dir) continue
         if (scorer === CORRECTNESS) {
           mkdirSync(join(dir, 'tree'), { recursive: true })
           sh('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', repo, sha, join(dir, 'tree')])
         } else {
-          const evidence = join(dir, 'evidence')
-          mkdirSync(evidence, { recursive: true })
-          writeFileSync(join(evidence, 'issue.md'), `# ${issue.title}\n\n${splitBenchMarker(issue.body).body}\n`)
-          writeFileSync(join(evidence, 'diff.patch'), git('diff', run.baseSha, sha) + '\n')
-          writeFileSync(join(evidence, 'transcript.md'), transcriptMarkdown(run.stages.filter((s) => s.agent === 'implement').map((s) => {
-            const file = join(runsDir, 'transcripts', run.id, `${stageName(s.agent, s.round)}.jsonl`)
-            const stored = s.transcript === 'stored' && existsSync(file)
-            return { name: stageName(s.agent, s.round), steps: stored ? harnesses[s.harness].steps(readFileSync(file, 'utf8')) : null }
-          })))
+          writeEvidence(dir, judgeEvidence({ title: issue.title, body: splitBenchMarker(issue.body).body }, git('diff', run.baseSha, sha),
+            run.stages.filter((s) => s.agent === 'implement').map((s) => {
+              const file = join(runsDir, 'transcripts', run.id, `${stageName(s.agent, s.round)}.jsonl`)
+              const stored = s.transcript === 'stored' && existsSync(file)
+              return { name: stageName(s.agent, s.round), steps: stored ? harnesses[s.harness].steps(readFileSync(file, 'utf8')) : null }
+            })))
         }
-        writeJsonFile(join(dir, 'job.json'), { runId: run.id, scorer, task: run.task, sha } satisfies ScoreJob)
+        writeJsonFile(join(dir, 'job.json'), { subject, scorer, task: run.task, sha } satisfies ScoreJob)
       }
       console.log(`score-prepare: ${run.id} ${run.repo}#${run.issueNumber} at ${sha.slice(0, 7)}: ${jobs.map((j) => j.scorer).join(', ')}`)
     } catch (e) {
       console.log(`score-prepare: warning: skipped ${run.id}: ${(e as Error).message.split('\n')[0]}`)
     }
   }
+
+  for (const [cell, jobs] of benchPending) {
+    const subject = benchSubject(cell)
+    try {
+      const evidence = benchEvidence(runsDir, tasksDir, cell)
+      for (const { scorer } of jobs) {
+        const dir = scoreJobDir(subject, scorer)
+        if (!dir) continue
+        writeEvidence(dir, evidence)
+        writeJsonFile(join(dir, 'job.json'), { subject, scorer, task: cell.task, sha: cell.baseSha } satisfies ScoreJob)
+      }
+      console.log(`score-prepare: bench ${cell.benchId} ${subject.cell}: ${jobs.map((j) => j.scorer).join(', ')}`)
+    } catch (e) {
+      console.log(`score-prepare: warning: skipped bench ${cell.benchId} ${subject.cell}: ${(e as Error).message.split('\n')[0]}`)
+    }
+  }
   // These clones hold FACTORY_GH_TOKEN in their remote URL, and the next step must not see it.
   for (const dir of [runsDir, runFile('repos')]) rmSync(dir, { recursive: true, force: true })
+}
+
+const subjectName = (s: ScoreSubject) => (s.kind === 'run' ? s.runId : `bench ${s.benchId} ${s.cell}`)
+
+// A fresh job dir for (subject, scorer), or null when a prepared job is already waiting there.
+function scoreJobDir(subject: ScoreSubject, scorer: string): string | null {
+  const dir = join(scoreJobs(), subject.kind === 'run' ? `${subject.runId}__${scorer}` : `bench__${subject.benchId}__${subject.cell}__${scorer}`)
+  if (existsSync(join(dir, 'job.json'))) return null
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function writeEvidence(dir: string, files: JudgeEvidence) {
+  mkdirSync(join(dir, 'evidence'))
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, 'evidence', name), text)
 }
 
 function scoreJudge() {
@@ -473,7 +507,7 @@ function scoreJudge() {
     const dir = join(scoreJobs(), name)
     if (existsSync(join(dir, 'score.json')) || !existsSync(join(dir, 'job.json'))) continue
     const job = readJsonFile<ScoreJob>(join(dir, 'job.json'))
-    const base = { runId: job.runId, scorer: job.scorer, sha: job.sha, factorySha }
+    const base = { subject: job.subject, scorer: job.scorer, sha: job.sha, factorySha }
     try {
       let score: Score
       if (job.scorer === CORRECTNESS) {
@@ -496,9 +530,9 @@ function scoreJudge() {
         }
       }
       writeJsonFile(join(dir, 'score.json'), score)
-      console.log(`score-judge: ${job.runId} ${job.scorer}: ${score.pass === null ? 'unknown' : score.pass ? 'pass' : 'fail'}`)
+      console.log(`score-judge: ${subjectName(job.subject)} ${job.scorer}: ${score.pass === null ? 'unknown' : score.pass ? 'pass' : 'fail'}`)
     } catch (e) {
-      console.log(`score-judge: warning: ${job.runId} ${job.scorer} not scored: ${(e as Error).message.split('\n')[0]}`)
+      console.log(`score-judge: warning: ${subjectName(job.subject)} ${job.scorer} not scored: ${(e as Error).message.split('\n')[0]}`)
       // The job stays pending for the next run, and the workflow shows it failed.
       process.exitCode = 1
     }
@@ -512,7 +546,7 @@ function scoreSave() {
     const job = join(scoreJobs(), name)
     if (!existsSync(join(job, 'score.json'))) continue
     const score = readJsonFile<Score>(join(job, 'score.json'))
-    const target = join(dir, 'scores', score.runId, `${score.scorer}.json`)
+    const target = join(dir, scorePath(score.subject, score.scorer))
     // A score is never recomputed or overwritten.
     if (existsSync(target)) continue
     mkdirSync(dirname(target), { recursive: true })
@@ -537,8 +571,11 @@ function benchRun() {
   if (unknown.length || !tasks.length) throw new Error(`unknown bench tasks: ${unknown.join(', ') || '(none given)'}; known: ${known.join(', ')}`)
   const base = resolve(env('FACTORY_WORK_DIR'))
   const baseSha = sh('git', ['-C', base, 'rev-parse', 'HEAD'])
-  const implement = loadAgent(agentsDir, 'implement')
-  const fixed = { benchId: env('BENCH_ID'), factoryRef: env('FACTORY_REF'), factorySha: sh('git', ['-C', factoryDir, 'rev-parse', 'HEAD']), baseSha }
+  // The code, tasks and hidden checks come from this checkout; only the prompt under test comes from factory_ref, so any
+  // proposal branch can be benched however far main has moved, and a branch can never change the checks it is graded by.
+  const refDir = resolve(env('BENCH_FACTORY_REF_DIR'))
+  const implement = loadAgent(join(refDir, 'agents'), 'implement')
+  const fixed = { benchId: env('BENCH_ID'), factoryRef: env('FACTORY_REF'), factorySha: sh('git', ['-C', refDir, 'rev-parse', 'HEAD']), baseSha }
   mkdirSync(benchCells(), { recursive: true })
   console.log(`bench-run: ${fixed.benchId}: ${tasks.length} tasks x ${configs.length} configs, implement.md at ${fixed.factoryRef} (${fixed.factorySha.slice(0, 7)}), base ${baseSha.slice(0, 7)}`)
 
@@ -556,8 +593,9 @@ function benchRun() {
         const prompt = `${implement.prompt}\n\n## Issue: ${title}\n\n${body}`
         const run = runAgent(cell, { ...config, prompt, mounts: [`${work}:/work`], log: join(benchCells(), cell) })
         sh('rsync', ['-a', '--exclude=.git', `${work}/`, `${tree}/`])
-        const grade = gradeTree(tree, checkFile(task), sandbox(tree))
-        const result: Omit<BenchResult, 'transcript'> = {
+        const { diff, grade } = diffAndGrade(base, baseSha, tree, checkFile(task), sandbox(tree))
+        writeFileSync(join(benchCells(), `${cell}.patch`), diff)
+        const result: Omit<BenchResult, 'transcript' | 'diff'> = {
           ...fixed,
           task,
           harness: config.harness,
@@ -586,14 +624,17 @@ function benchSave() {
   const files = existsSync(benchCells()) ? readdirSync(benchCells()).filter((f) => f.endsWith('.json')) : []
   let saved = 0
   for (const file of files) {
-    const result = readJsonFile<Omit<BenchResult, 'transcript'>>(join(benchCells(), file))
+    const result = readJsonFile<Omit<BenchResult, 'transcript' | 'diff'>>(join(benchCells(), file))
     const target = join(dir, 'bench', result.benchId, file)
     if (existsSync(target)) continue
     mkdirSync(dirname(target), { recursive: true })
     const raw = join(benchCells(), file.replace(/\.json$/, '.jsonl'))
     const transcript = existsSync(raw) ? storable(readFileSync(raw, 'utf8')) : null
     if (transcript) writeFileSync(target.replace(/\.json$/, '.jsonl'), transcript)
-    writeJsonFile(target, { ...result, transcript: transcript ? 'stored' : 'withheld' } satisfies BenchResult)
+    const patch = join(benchCells(), file.replace(/\.json$/, '.patch'))
+    const diff = existsSync(patch) ? storable(readFileSync(patch, 'utf8')) : null
+    if (diff) writeFileSync(target.replace(/\.json$/, '.patch'), diff)
+    writeJsonFile(target, { ...result, transcript: transcript ? 'stored' : 'withheld', diff: diff ? 'stored' : 'withheld' } satisfies BenchResult)
     saved++
   }
   if (!pushRunsRepo(dir, `bench: ${saved} results`)) return console.log('bench-save: nothing new to save')
@@ -613,7 +654,7 @@ function readEvidence(runsRepoDir: string): Evidence {
     const file = s && join(runsRepoDir, 'transcripts', r.id, `${stageName(s.agent, s.round)}.jsonl`)
     if (s?.transcript === 'stored' && file && existsSync(file)) reviews[r.id] = harnesses[s.harness].parse(readFileSync(file, 'utf8')).finalText
   }
-  return { records, scores: readNested<Score>(runsRepoDir, 'scores'), bench: readNested<BenchResult>(runsRepoDir, 'bench'), reviews }
+  return { records, scores: readScores(runsRepoDir), bench: readNested<BenchResult>(runsRepoDir, 'bench'), reviews }
 }
 
 function improvePrepare() {
@@ -752,8 +793,16 @@ function readRecords(runsRepoDir: string): RunRecord[] {
     .map((f) => JSON.parse(readFileSync(join(runsRepoDir, 'runs', f), 'utf8')))
 }
 
-// Files under <runs repo>/<kind>/<id>/*.json, such as scores/<runId>/<scorer>.json. A missing dir has none.
-function readNested<T>(runsRepoDir: string, kind: 'scores' | 'bench' | 'improvements'): T[] {
+// Every score file, as `scores/...` paths: run scores and bench cell scores alike.
+function scoreFiles(runsRepoDir: string): string[] {
+  const root = join(runsRepoDir, 'scores')
+  return existsSync(root) ? readdirSync(root, { recursive: true, encoding: 'utf8' }).map((f) => `scores/${f}`).sort() : []
+}
+
+const readScores = (runsRepoDir: string) => scoreFiles(runsRepoDir).filter((f) => f.endsWith('.json')).map((f) => readJsonFile<Score>(join(runsRepoDir, f)))
+
+// Files under <runs repo>/<kind>/<id>/*.json, such as bench/<benchId>/<cell>.json. A missing dir has none.
+function readNested<T>(runsRepoDir: string, kind: 'bench' | 'improvements'): T[] {
   const root = join(runsRepoDir, kind)
   return subdirs(root).flatMap((id) => readdirSync(join(root, id)).filter((f) => f.endsWith('.json')).map((f) => readJsonFile<T>(join(root, id, f))))
 }
@@ -771,19 +820,19 @@ function db(runsRepoDir: string) {
     input_tokens INTEGER, cache_read_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, started_at TEXT, wall_time_s INTEGER,
     transcript TEXT, PRIMARY KEY (run_id, agent, round))`)
   database.exec(`CREATE TABLE scores (
-    run_id TEXT REFERENCES runs(id), scorer TEXT, pass INTEGER, reason TEXT, sha TEXT, factory_sha TEXT, at TEXT,
-    judge_harness TEXT, judge_model TEXT, judge_billing TEXT, judge_cost_usd REAL, judge_wall_time_s INTEGER, PRIMARY KEY (run_id, scorer))`)
+    run_id TEXT REFERENCES runs(id), bench_id TEXT, cell TEXT, scorer TEXT, pass INTEGER, reason TEXT, sha TEXT, factory_sha TEXT, at TEXT,
+    judge_harness TEXT, judge_model TEXT, judge_billing TEXT, judge_cost_usd REAL, judge_wall_time_s INTEGER)`)
   database.exec(`CREATE TABLE bench (
     bench_id TEXT, task TEXT, harness TEXT, requested_model TEXT, model TEXT, factory_ref TEXT, factory_sha TEXT, base_sha TEXT,
     billing TEXT, pass INTEGER, check_output TEXT, input_tokens INTEGER, cache_read_tokens INTEGER, output_tokens INTEGER,
-    cost_usd REAL, wall_time_s INTEGER, at TEXT, transcript TEXT, PRIMARY KEY (bench_id, task, harness, requested_model))`)
+    cost_usd REAL, wall_time_s INTEGER, at TEXT, transcript TEXT, diff TEXT, PRIMARY KEY (bench_id, task, harness, requested_model))`)
   database.exec(`CREATE TABLE improvements (
     id TEXT PRIMARY KEY, at TEXT, factory_sha TEXT, basis_runs INTEGER, basis_scores INTEGER, basis_failing_scores INTEGER, basis_benches TEXT,
     harness TEXT, model TEXT, cost_usd REAL, wall_time_s INTEGER, changed_files TEXT, status TEXT)`)
   const insertRun = database.prepare(`INSERT INTO runs VALUES (${Array(21).fill('?').join(', ')})`)
   const insertStage = database.prepare(`INSERT INTO stages VALUES (${Array(15).fill('?').join(', ')})`)
-  const insertScore = database.prepare(`INSERT INTO scores VALUES (${Array(12).fill('?').join(', ')})`)
-  const insertBench = database.prepare(`INSERT INTO bench VALUES (${Array(18).fill('?').join(', ')})`)
+  const insertScore = database.prepare(`INSERT INTO scores VALUES (${Array(14).fill('?').join(', ')})`)
+  const insertBench = database.prepare(`INSERT INTO bench VALUES (${Array(19).fill('?').join(', ')})`)
   const bool = (b: boolean | null) => (b === null ? null : b ? 1 : 0)
   const records = readRecords(runsRepoDir)
   for (const r of records) {
@@ -794,15 +843,16 @@ function db(runsRepoDir: string) {
         s.usage.cacheReadTokens, s.usage.outputTokens, s.usage.costUsd, s.startedAt, s.wallTimeS, s.transcript)
     }
   }
-  const scores = readNested<Score>(runsRepoDir, 'scores')
+  const scores = readScores(runsRepoDir)
   for (const s of scores) {
-    insertScore.run(s.runId, s.scorer, bool(s.pass), s.reason, s.sha, s.factorySha, s.at,
+    const { subject: x } = s
+    insertScore.run(x.kind === 'run' ? x.runId : null, x.kind === 'bench' ? x.benchId : null, x.kind === 'bench' ? x.cell : null, s.scorer, bool(s.pass), s.reason, s.sha, s.factorySha, s.at,
       s.judge?.harness ?? null, s.judge?.model ?? null, s.judge?.billing ?? null, s.judge?.costUsd ?? null, s.judge?.wallTimeS ?? null)
   }
   const bench = readNested<BenchResult>(runsRepoDir, 'bench')
   for (const b of bench) {
     insertBench.run(b.benchId, b.task, b.harness, b.requestedModel, b.model, b.factoryRef, b.factorySha, b.baseSha, b.billing, bool(b.pass),
-      b.checkOutput, b.usage.inputTokens, b.usage.cacheReadTokens, b.usage.outputTokens, b.costUsd, b.wallTimeS, b.at, b.transcript)
+      b.checkOutput, b.usage.inputTokens, b.usage.cacheReadTokens, b.usage.outputTokens, b.costUsd, b.wallTimeS, b.at, b.transcript, b.diff)
   }
   const improvements = readNested<Improvement>(runsRepoDir, 'improvements')
   const insertImprovement = database.prepare(`INSERT INTO improvements VALUES (${Array(13).fill('?').join(', ')})`)
@@ -848,7 +898,7 @@ function report(runsRepoDir: string) {
   }
 
   const file = join(runsRepoDir, 'report.html')
-  const scores = readNested<Score>(runsRepoDir, 'scores')
+  const scores = readScores(runsRepoDir)
   const bench = readNested<BenchResult>(runsRepoDir, 'bench')
   const improvements = readNested<Improvement>(runsRepoDir, 'improvements').map((i) => {
     const summary = join(runsRepoDir, 'improvements', i.id, 'summary.md')

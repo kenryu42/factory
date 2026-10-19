@@ -1,5 +1,5 @@
-# Called from a target repo's bench.yml (see examples/bench.yml). Runs the implement agent of kenryu42/factory at
-# factory_ref on each bench task, under each harness:model config, on one fixed commit of the target repo's default
+# Called from a target repo's bench.yml (see examples/bench.yml). Runs the implement agent prompt of kenryu42/factory
+# at factory_ref, with main's code, tasks and hidden checks, on each bench task, under each harness:model config, on one fixed commit of the target repo's default
 # branch. Each tree is graded by the task's check. Nothing is posted to GitHub: the results go to
 # <owner>/factory-runs under bench/<bench_id>/. The run step gets model credentials only, the save step FACTORY_GH_TOKEN.
 name: factory bench
@@ -47,8 +47,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: kenryu42/factory
-          ref: ${{ inputs.factory_ref }}
+          ref: main
           path: factory
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: kenryu42/factory
+          ref: ${{ inputs.factory_ref }}
+          path: factory-ref
           persist-credentials: false
 
       - uses: actions/setup-node@v7
@@ -71,6 +78,7 @@ jobs:
           BENCH_TASKS: ${{ inputs.tasks }}
           BENCH_CONFIGS: ${{ inputs.configs }}
           FACTORY_REF: ${{ inputs.factory_ref }}
+          BENCH_FACTORY_REF_DIR: factory-ref
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

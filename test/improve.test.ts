@@ -27,13 +27,13 @@ const stage = (agent: StageRun['agent'], round: number, verdict: StageRun['verdi
 })
 
 const score = (runId: string, scorer: string, pass: boolean | null, reason = 'reason'): Score => ({
-  runId, scorer, pass, reason, sha: 'abc1234', factorySha: 'f', at: '2026-10-19T06:00:00Z', judge: null,
+  subject: { kind: 'run', runId }, scorer, pass, reason, sha: 'abc1234', factorySha: 'f', at: '2026-10-19T06:00:00Z', judge: null,
 })
 
 const cell = (over: Partial<BenchResult>): BenchResult => ({
   benchId: 'b1', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-v4-flash', model: 'deepseek-v4-flash', factoryRef: 'main',
   factorySha: 'f'.repeat(40), baseSha: 'b'.repeat(40), billing: 'api', pass: true, checkOutput: 'ℹ pass 9', usage: { inputTokens: 1, cacheReadTokens: 0, outputTokens: 1, costUsd: 0.02 },
-  costUsd: 0.02, wallTimeS: 30, at: '2026-10-19T06:00:00Z', transcript: 'stored', ...over,
+  costUsd: 0.02, wallTimeS: 30, at: '2026-10-19T06:00:00Z', transcript: 'stored', diff: 'stored', ...over,
 })
 
 // The real output of the negative-money check on a tree that did not fix the bug and also broke one of its own tests.
@@ -242,4 +242,17 @@ test('propose refuses a patch that touches code, and creates no branch', () => {
   assert.equal(r.stderr.trim(), 'propose: refusing: the patch changes more than the agent prompts in agents/: out of scope: src/cli.ts')
   assert.equal(git('branch', '--list', 'improve/*'), '')
   assert.ok(!existsSync(join(root, 'gh')))
+})
+
+test("a bench cell's failing judge score is listed with its benchmark, task and config, and the bench table shows judge rates", () => {
+  const failing: Score = {
+    ...score('', 'redundant-tests', false, 'test/money.test.js repeats the existing two-decimals test.'),
+    subject: { kind: 'bench', benchId: 'b1', cell: 'negative-money__pi__deepseek_deepseek-v4-flash' },
+  }
+  const md = findingsMarkdown(evidence({ bench: [cell({})], scores: [failing] }))
+  assert.match(md, /^\| Config \| Tasks \| Pass rate \| redundant-tests \| Avg cost \|$/m)
+  assert.match(md, /^\| pi:deepseek\/deepseek-v4-flash \| 1 \| 100% \| 0% \| \$0\.02 \|$/m)
+  const section = md.slice(md.indexOf('## Failing redundant-tests scores (1)'))
+  assert.match(section, /- benchmark `b1` · task `negative-money` · pi:deepseek\/deepseek-v4-flash · \$0\.02\n  The judge's reason:/)
+  assert.match(section, /repeats the existing two-decimals test/)
 })

@@ -1,5 +1,6 @@
 # Called from a target repo's score.yml (see examples/score.yml). Grades every recorded implement run in
-# <owner>/factory-runs that has a PR and is missing a score, and pushes scores/<runId>/<scorer>.json.
+# <owner>/factory-runs that has a PR and is missing a score, and pushes scores/<runId>/<scorer>.json. The judges also grade
+# bench cells with a stored diff, into scores/bench/<benchId>/<cell>/<scorer>.json.
 # The secret split matches run.yml: the steps that talk to GitHub get FACTORY_GH_TOKEN (plus the model credentials,
 # only to scrub them from what they push), and the step that runs judges gets model credentials only.
 name: factory score

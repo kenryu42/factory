@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loadAgents, parseScore } from '../src/agents.ts'
 import { harnesses } from '../src/harnesses.ts'
-import { gradeTree, pendingScores, transcriptMarkdown } from '../src/score.ts'
-import type { RunRecord } from '../src/types.ts'
+import { benchEvidence, CHECK_FILE, diffAndGrade, gradeTree, pendingBenchScores, pendingScores, transcriptMarkdown } from '../src/score.ts'
+import type { BenchResult, RunRecord } from '../src/types.ts'
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
 // A real record: pi resolved factory-sandbox#14 (bench task negative-money), and the review approved.
@@ -122,4 +123,58 @@ test('a bench task without a check cannot be graded', () => {
   const grade = gradeTree(repo('no-check', fixed), join(tmp, 'no-such-task', 'check.test.js'))
   assert.equal(grade.pass, null)
   assert.match(grade.reason, /no check/)
+})
+
+// A bench cell as bench-save stores it: pi resolved negative-money in bench b7.
+const benchCell = (over: Partial<BenchResult> = {}): BenchResult => ({
+  benchId: 'b7', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-flash', model: 'deepseek/deepseek-flash', factoryRef: 'improve/4242-1',
+  factorySha: 'f'.repeat(40), baseSha: 'b'.repeat(40), billing: 'api', pass: true, checkOutput: 'ℹ pass 2', usage: { inputTokens: 6669, cacheReadTokens: 51328, outputTokens: 5532, costUsd: 0.009 },
+  costUsd: 0.009, wallTimeS: 29, at: '2026-10-19T12:07:18Z', transcript: 'stored', diff: 'stored', ...over,
+})
+
+test('pending bench scores: every judge for each cell with a stored transcript and diff, never correctness, never twice', () => {
+  const cells = [
+    benchCell(),
+    benchCell({ task: 'recurring', requestedModel: 'deepseek/deepseek-v4-pro' }),
+    benchCell({ task: 'slugify-clean', diff: 'withheld' }),
+    benchCell({ task: 'month-range', transcript: 'withheld' }),
+  ]
+  const existing = ['scores/bench/b7/recurring__pi__deepseek_deepseek-v4-pro/scope.json', 'scores/negative-money__pi__deepseek_deepseek-flash/honest-summary.json']
+  const pending = pendingBenchScores(cells, ['correctness', 'honest-summary', 'scope'], existing)
+  assert.deepEqual(pending.map((p) => `${p.cell.task}/${p.scorer}`), ['negative-money/honest-summary', 'negative-money/scope', 'recurring/honest-summary'])
+})
+
+test("a graded bench cell's evidence holds the task's issue, the agent's own change and tests, and never the hidden check", () => {
+  const base = repo('bench-base', 'return `$${amount.toFixed(2)}`')
+  const git = (...args: string[]) => {
+    const r = spawnSync('git', ['-C', base, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    return r.stdout.trim()
+  }
+  git('init', '--quiet')
+  git('add', '-A')
+  git('commit', '--quiet', '-m', 'base')
+  const baseSha = git('rev-parse', 'HEAD')
+  const tree = join(tmp, 'bench-tree')
+  cpSync(base, tree, { recursive: true, filter: (src) => !src.includes('.git') })
+  writeFileSync(join(tree, 'src', 'money.js'), `export function formatMoney(amount) {\n  ${fixed}\n}\n`)
+  writeFileSync(join(tree, 'test', 'refund.test.js'), "import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { formatMoney } from '../src/money.js'\n\ntest('refunds', () => assert.equal(formatMoney(-12), '-$12.00'))\n")
+
+  const { diff, grade } = diffAndGrade(base, baseSha, tree, check)
+  assert.equal(grade.pass, true, grade.reason)
+  assert.match(diff, /^\+\+\+ b\/src\/money\.js$/m)
+  assert.match(diff, /^\+\+\+ b\/test\/refund\.test\.js$/m)
+  assert.ok(!diff.includes(CHECK_FILE), 'the hidden check is not part of the change')
+  assert.equal(git('status', '--porcelain'), '', 'the base checkout is untouched')
+
+  const runs = join(tmp, 'runs')
+  const cell = benchCell({ baseSha })
+  mkdirSync(join(runs, 'bench', 'b7'), { recursive: true })
+  writeFileSync(join(runs, 'bench', 'b7', 'negative-money__pi__deepseek_deepseek-flash.patch'), diff)
+  writeFileSync(join(runs, 'bench', 'b7', 'negative-money__pi__deepseek_deepseek-flash.jsonl'), fixture('pi-negative-money.jsonl'))
+  const evidence = benchEvidence(runs, fileURLToPath(new URL('../bench/tasks', import.meta.url)), cell)
+  assert.equal(evidence['issue.md'], readFileSync(new URL('../bench/tasks/negative-money/task.md', import.meta.url), 'utf8'))
+  assert.equal(evidence['diff.patch'], diff)
+  assert.match(evidence['transcript.md'], /^# Stage implement-0\n/)
+  assert.match(evidence['transcript.md'], /## 21\. Tool call: bash\n\n```\ncommand: npm test/)
 })

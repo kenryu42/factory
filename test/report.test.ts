@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { benchSummary, calibration, paretoFrontier, prOutcome, renderReport, scoreSummary, summarize, type PrView } from '../src/report.ts'
+import { benchComparisons, benchSummary, calibration, paretoFrontier, prOutcome, renderReport, scoreSummary, summarize, type PrView } from '../src/report.ts'
 import type { BenchResult, ReportRow, Score, StageRun } from '../src/types.ts'
 
 // A real `gh pr view --json ...` payload for an open factory PR: one CodeRabbit comment, one factory commit.
@@ -165,7 +165,7 @@ test('spec runs count under their own status', () => {
 
 function score(runId: string, scorer: string, pass: boolean | null): Score {
   return {
-    runId, scorer, pass, reason: pass === null ? 'The judge did not finish.' : 'ℹ pass 10', sha: 'c535f0b', factorySha: 'f', at: '2026-10-19T12:00:00Z',
+    subject: { kind: 'run', runId }, scorer, pass, reason: pass === null ? 'The judge did not finish.' : 'ℹ pass 10', sha: 'c535f0b', factorySha: 'f', at: '2026-10-19T12:00:00Z',
     judge: scorer === 'correctness' ? null : { harness: 'pi', model: 'deepseek/deepseek-v4-flash', billing: 'api', costUsd: 0.002, wallTimeS: 20 },
   }
 }
@@ -218,7 +218,7 @@ function cell(over: Partial<BenchResult>): BenchResult {
     benchId: 'b1', task: 'negative-money', harness: 'pi', requestedModel: 'deepseek/deepseek-v4-flash', model: 'deepseek/deepseek-v4-flash',
     factoryRef: 'main', factorySha: '844065abe6575eaedda591277ce42e62d8b45126', baseSha: '226c94b271c2171da2bfdeac39542313240dea84', billing: 'api',
     pass: true, checkOutput: 'ℹ pass 10', usage: { inputTokens: 4451, cacheReadTokens: 25600, outputTokens: 1395, costUsd: 0.01 }, costUsd: 0.01,
-    wallTimeS: 20, at: '2026-10-19T12:00:00Z', transcript: 'stored', ...over,
+    wallTimeS: 20, at: '2026-10-19T12:00:00Z', transcript: 'stored', diff: 'stored', ...over,
   }
 }
 
@@ -233,7 +233,7 @@ test('bench summary: pass rate over graded tasks, average cost and time, and the
     cell({ ...haiku, task: 'recurring', pass: false, costUsd: null }),
     cell({ ...sonnet, task: 'negative-money', costUsd: 0.3 }),
     cell({ ...sonnet, task: 'recurring', costUsd: 0.5 }),
-  ])
+  ], [])
   const byConfig = Object.fromEntries(b1.configs.map((c) => [`${c.harness}:${c.model}`, c]))
   assert.equal(byConfig['pi:deepseek/deepseek-v4-flash'].tasks, 3)
   assert.equal(byConfig['pi:deepseek/deepseek-v4-flash'].passRate, 0.5)
@@ -249,7 +249,7 @@ test('bench summary: pass rate over graded tasks, average cost and time, and the
 })
 
 test('benches are kept apart and the newest comes first', () => {
-  const summaries = benchSummary([cell({ benchId: 'old', at: '2026-10-01T00:00:00Z' }), cell({ benchId: 'new', at: '2026-10-19T00:00:00Z' })])
+  const summaries = benchSummary([cell({ benchId: 'old', at: '2026-10-01T00:00:00Z' }), cell({ benchId: 'new', at: '2026-10-19T00:00:00Z' })], [])
   assert.deepEqual(summaries.map((b) => [b.benchId, b.configs.length]), [['new', 1], ['old', 1]])
 })
 
@@ -263,7 +263,68 @@ test('the page carries each run score and the bench summary', () => {
     improvements: [],
   })
   const data = JSON.parse(html.match(/id="report-data">([^<]*)</)![1])
-  assert.deepEqual(data.scores.map((s: Score) => [s.runId, s.scorer, s.pass]), [['run-1', 'correctness', false], ['run-1', 'scope', true]])
+  assert.deepEqual(data.scores.map((s: Score) => [s.subject, s.scorer, s.pass]), [
+    [{ kind: 'run', runId: 'run-1' }, 'correctness', false], [{ kind: 'run', runId: 'run-1' }, 'scope', true],
+  ])
   assert.deepEqual(data.calibration.approve, { correct: 0, wrong: 1 })
   assert.equal(data.bench[0].configs[0].passRate, 1)
+})
+
+const judged = (benchId: string, task: string, scorer: string, pass: boolean | null): Score => ({
+  ...score('', scorer, pass), subject: { kind: 'bench', benchId, cell: `${task}__pi__deepseek_deepseek-v4-flash` },
+})
+
+// main's bench (rerun after the improvement's) and the improvement branch's bench, over the same tasks and pi config.
+// main's bench also ran a task the branch did not, and the branch also ran a config main did not.
+function mainVsImprove() {
+  const main = { benchId: 'main-2', factoryRef: 'main', factorySha: 'a'.repeat(40), at: '2026-10-20T00:00:00Z' }
+  const imp = { benchId: 'imp-1', factoryRef: 'improve/4242-1', factorySha: 'c'.repeat(40), at: '2026-10-19T00:00:00Z' }
+  const bench = [
+    cell({ ...main, task: 't1', costUsd: 0.02 }), cell({ ...main, task: 't2', costUsd: 0.04 }), cell({ ...main, task: 't3', pass: false, costUsd: 0.06 }),
+    cell({ ...main, task: 'only-main' }),
+    cell({ ...imp, task: 't1', costUsd: 0.03 }), cell({ ...imp, task: 't2', costUsd: 0.05 }), cell({ ...imp, task: 't3', costUsd: 0.07 }),
+    cell({ ...imp, task: 't1', harness: 'claude-code', requestedModel: 'haiku' }),
+  ]
+  const scores = [
+    judged('main-2', 't1', 'redundant-tests', false), judged('main-2', 't2', 'redundant-tests', true), judged('main-2', 't3', 'redundant-tests', null),
+    judged('main-2', 'only-main', 'redundant-tests', false),
+    judged('imp-1', 't1', 'redundant-tests', true), judged('imp-1', 't2', 'redundant-tests', true), judged('imp-1', 't3', 'redundant-tests', true),
+    judged('imp-1', 't1', 'scope', false),
+    score('a-run', 'scope', true),
+  ]
+  return { bench, scores }
+}
+
+test('a bench on an improvement branch is compared with main per config and scorer over the tasks both ran', () => {
+  const { bench, scores } = mainVsImprove()
+  const [cmp, ...rest] = benchComparisons(bench, scores)
+  assert.equal(rest.length, 0)
+  assert.deepEqual([cmp.a.benchId, cmp.b.benchId], ['main-2', 'imp-1'], 'main is A even when it ran later')
+  assert.deepEqual(cmp.configs.map((c) => [`${c.harness}:${c.model}`, c.tasks]), [['pi:deepseek/deepseek-v4-flash', 3]])
+  const metrics = Object.fromEntries(cmp.configs[0].metrics.map((m) => [m.scorer, m]))
+  assert.deepEqual(Object.keys(metrics), ['correctness', 'redundant-tests', 'scope'])
+  assert.deepEqual([metrics.correctness.a, metrics.correctness.b], [{ pass: 2, fail: 1, unknown: 0 }, { pass: 3, fail: 0, unknown: 0 }])
+  assert.ok(Math.abs(metrics.correctness.delta! - 1 / 3) < 1e-12)
+  assert.deepEqual([metrics['redundant-tests'].a, metrics['redundant-tests'].b], [{ pass: 1, fail: 1, unknown: 1 }, { pass: 3, fail: 0, unknown: 0 }])
+  assert.equal(metrics['redundant-tests'].delta, 0.5, 'unknown scores stay out of the rate')
+  assert.equal(metrics.scope.delta, null, 'main has no scope scores, so no delta')
+  assert.ok(Math.abs(cmp.configs[0].avgCostUsd.a! - 0.04) < 1e-12)
+  assert.ok(Math.abs(cmp.configs[0].avgCostUsd.b! - 0.05) < 1e-12)
+})
+
+test('benches on the same factory ref are not compared', () => {
+  const { bench, scores } = mainVsImprove()
+  assert.deepEqual(benchComparisons(bench.map((c) => ({ ...c, factoryRef: 'main' })), scores), [])
+})
+
+test('the page carries judge pass rates per bench config and the comparison', () => {
+  const { bench, scores } = mainVsImprove()
+  const html = renderReport({ generatedAt: '2026-10-20T06:00:00Z', rows: [], steps: {}, scores, bench, improvements: [] })
+  const data = JSON.parse(html.match(/id="report-data">([^<]*)</)![1])
+  const imp = data.bench.find((b: { benchId: string }) => b.benchId === 'imp-1')
+  const pi = imp.configs.find((c: { harness: string }) => c.harness === 'pi')
+  assert.deepEqual(pi.judges, { 'redundant-tests': { pass: 3, fail: 0, unknown: 0 }, scope: { pass: 0, fail: 1, unknown: 0 } })
+  assert.equal(imp.factoryRef, 'improve/4242-1')
+  assert.equal(data.comparisons.length, 1)
+  assert.equal(data.comparisons[0].configs[0].metrics[1].delta, 0.5)
 })

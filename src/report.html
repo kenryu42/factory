@@ -99,6 +99,9 @@
   .grid th { font-size: 12px; font-weight: 600; color: var(--muted); }
   .grid td.num, .grid th.num { text-align: right; }
   .missed { color: var(--bad); font-weight: 600; }
+  .up { color: var(--ok); }
+  .grid tr.group td { border-top: 1px solid var(--line); padding-top: 6px; }
+  .down { color: var(--bad); }
   .scores { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
   .score-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
   .chart { width: 100%; max-width: 560px; height: auto; display: block; margin-top: 12px; }
@@ -141,7 +144,7 @@
   const pct = (x) => (x === null || x === undefined ? 'n/a' : Math.round(x * 100) + '%')
   const scoreWord = (p) => (p === null ? 'unknown' : p ? 'pass' : 'fail')
   const scorePill = (s, hover) => (s ? h('span', { class: 'pill sc-' + scoreWord(s.pass), title: hover ? s.reason : null }, scoreWord(s.pass)) : '')
-  const scoresOf = (id) => data.scores.filter((s) => s.runId === id).sort((a, b) => Number(b.scorer === 'correctness') - Number(a.scorer === 'correctness') || a.scorer.localeCompare(b.scorer))
+  const scoresOf = (id) => data.scores.filter((s) => s.subject.kind === 'run' && s.subject.runId === id).sort((a, b) => Number(b.scorer === 'correctness') - Number(a.scorer === 'correctness') || a.scorer.localeCompare(b.scorer))
   const stageKey = (s) => `${s.agent}-${s.round}`
   const stageHref = (r, s) => '#run=' + encodeURIComponent(r.id) + '&stage=' + encodeURIComponent(stageKey(s))
 
@@ -222,6 +225,7 @@
         tbody)),
       ...scoresSection(),
       ...benchSection(),
+      ...compareSection(),
       ...improvementsSection(),
     ]
   }
@@ -300,21 +304,62 @@
     return svg
   }
 
+  const rateOf = (t) => (t.pass + t.fail ? t.pass / (t.pass + t.fail) : null)
+  function tallyCell(t) {
+    if (!t || !(t.pass + t.fail + t.unknown)) return h('span', { class: 'muted' }, '-')
+    const graded = t.pass + t.fail
+    return [graded ? `${pct(rateOf(t))} (${t.pass}/${graded})` : 'n/a', t.unknown ? h('span', { class: 'muted' }, ` +${t.unknown} unknown`) : '']
+  }
+
   function benchSection() {
     if (!data.bench.length) return []
-    return [h('section', {}, h('h2', {}, 'Benchmarks'), data.bench.map((b) => h('div', { class: 'panel', style: 'margin-bottom:12px' },
-      h('div', { class: 'score-head' }, h('b', {}, `bench ${b.benchId}`),
-        h('span', { class: 'muted' }, `implement.md at ${b.factoryRef} (${b.factorySha.slice(0, 7)}) · base ${b.baseSha.slice(0, 7)} · ${date(b.at)}`)),
-      h('div', {},
-        h('div', { style: 'overflow-x:auto' }, grid([['Config'], ['Tasks', 'num'], ['Pass rate', 'num'], ['Avg cost', 'num'], ['Avg time', 'num'], ['Frontier']],
-          b.configs.slice().sort((p, q) => (q.passRate ?? -1) - (p.passRate ?? -1) || (p.avgCostUsd ?? 0) - (q.avgCostUsd ?? 0)).map((c) => h('tr', {},
-            h('td', {}, `${c.harness}:${c.model}`),
-            h('td', { class: 'num' }, String(c.tasks)),
-            h('td', { class: 'num' }, pct(c.passRate)),
-            h('td', { class: 'num' }, usd(c.avgCostUsd)),
-            h('td', { class: 'num' }, dur(Math.round(c.avgWallTimeS))),
-            h('td', {}, c.pareto ? pill('sc-pass', 'frontier') : ''))))),
-        scatter(b.configs)))))]
+    return [h('section', {}, h('h2', {}, 'Benchmarks'), data.bench.map((b) => {
+      const judges = [...new Set(b.configs.flatMap((c) => Object.keys(c.judges)))].sort()
+      return h('div', { class: 'panel', style: 'margin-bottom:12px' },
+        h('div', { class: 'score-head' }, h('b', {}, `bench ${b.benchId}`),
+          h('span', { class: 'muted' }, `implement.md at ${b.factoryRef} (${b.factorySha.slice(0, 7)}) · base ${b.baseSha.slice(0, 7)} · ${date(b.at)}`)),
+        h('div', {},
+          h('div', { style: 'overflow-x:auto' }, grid([['Config'], ['Tasks', 'num'], ['Correct', 'num'], ...judges.map((j) => [j, 'num']), ['Avg cost', 'num'], ['Avg time', 'num'], ['Frontier']],
+            b.configs.slice().sort((p, q) => (q.passRate ?? -1) - (p.passRate ?? -1) || (p.avgCostUsd ?? 0) - (q.avgCostUsd ?? 0)).map((c) => h('tr', {},
+              h('td', {}, `${c.harness}:${c.model}`),
+              h('td', { class: 'num' }, String(c.tasks)),
+              h('td', { class: 'num' }, pct(c.passRate)),
+              judges.map((j) => h('td', { class: 'num' }, tallyCell(c.judges[j]))),
+              h('td', { class: 'num' }, usd(c.avgCostUsd)),
+              h('td', { class: 'num' }, dur(Math.round(c.avgWallTimeS))),
+              h('td', {}, c.pareto ? pill('sc-pass', 'frontier') : ''))))),
+          scatter(b.configs)))
+    }))]
+  }
+
+  // A delta in percentage points, colored by whether B is better. For cost, lower is better.
+  function delta(d, fmt, lowerIsBetter) {
+    if (d === null) return h('span', { class: 'muted' }, 'n/a')
+    const better = lowerIsBetter ? d < 0 : d > 0
+    return h('span', { class: d === 0 ? 'muted' : better ? 'up' : 'down' }, (d > 0 ? '+' : d < 0 ? '−' : '±') + fmt(Math.abs(d)))
+  }
+  const side = (x) => `${x.factoryRef} (${x.factorySha.slice(0, 7)}) · bench ${x.benchId}`
+
+  function compareSection() {
+    if (!data.comparisons.length) return []
+    return [h('section', {}, h('h2', {}, 'Bench comparisons'), data.comparisons.map((cmp) => h('div', { class: 'panel', style: 'margin-bottom:12px' },
+      h('div', { class: 'score-head' }, h('b', {}, 'A'), h('span', {}, side(cmp.a)), h('b', {}, 'B'), h('span', {}, side(cmp.b))),
+      h('p', { class: 'muted', style: 'margin:0 0 8px;font-size:12px' }, 'Pass rates over the tasks both benches ran under each config. Unknown scores are left out of the rate.'),
+      h('div', { style: 'overflow-x:auto' }, grid([['Config'], ['Tasks', 'num'], ['Scorer'], ['A', 'num'], ['B', 'num'], ['B − A', 'num']],
+        cmp.configs.flatMap((c) => [
+          ...c.metrics.map((m, i) => h('tr', { class: i === 0 ? 'group' : null },
+            h('td', {}, i === 0 ? `${c.harness}:${c.model}` : ''),
+            h('td', { class: 'num' }, i === 0 ? String(c.tasks) : ''),
+            h('td', {}, m.scorer),
+            h('td', { class: 'num' }, tallyCell(m.a)),
+            h('td', { class: 'num' }, tallyCell(m.b)),
+            h('td', { class: 'num' }, delta(m.delta, (x) => Math.round(x * 100) + ' pts')))),
+          h('tr', {},
+            h('td', {}), h('td', {}), h('td', { class: 'muted' }, 'avg cost'),
+            h('td', { class: 'num' }, usd(c.avgCostUsd.a)),
+            h('td', { class: 'num' }, usd(c.avgCostUsd.b)),
+            h('td', { class: 'num' }, delta(c.avgCostUsd.a === null || c.avgCostUsd.b === null ? null : c.avgCostUsd.b - c.avgCostUsd.a, usd, true))),
+        ]))))))]
   }
 
   function improvementsSection() {

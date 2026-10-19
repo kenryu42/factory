@@ -29,6 +29,8 @@ To tie a run to a benchmark task, put `<!-- bench:<task-id> -->` in the issue bo
 
 `examples/score.yml` in a target repo calls `.github/workflows/score.yml` on demand. It grades every implement run in `factory-runs` that opened a PR and has no score yet, and pushes one file per run and scorer to `scores/<run-id>/<scorer>.json`. A score is never recomputed. Each grades the last commit the factory pushed to the PR, so later human commits do not count.
 
+The judges also grade every bench cell whose transcript and diff were stored and that has no score yet, and push `scores/bench/<bench-id>/<cell>/<scorer>.json`. A cell's `issue.md` is its task's `task.md`, and its correctness is the cell's own check. Each score names what it grades in `subject`: `{ "kind": "run", "runId" }` or `{ "kind": "bench", "benchId", "cell" }`.
+
 - `correctness` runs for runs with a bench task. It copies the task's check into a fresh copy of the graded tree as `test/zz-bench-check.test.js` and runs `node --test` in the agent image with no network and no credentials. It passes only when the whole suite passes, so breaking the repo's own tests fails too. The reason is the tail of the test output.
 - Every `scorers/<name>.md` is an LLM judge for one failure mode, in the same format as the agent files. A judge reads `issue.md`, `diff.patch`, and `transcript.md` (the implement stages as readable sections) from a read-only directory and ends with `SCORE: pass` or `SCORE: fail`. Anything else, or a judge that does not finish, scores `null`. Its scrubbed transcript is stored next to the score as `<scorer>.jsonl`.
 
@@ -43,13 +45,15 @@ The workflow has three steps: `score-prepare` (FACTORY_GH_TOKEN) gathers the evi
 - `factory_ref`: the ref of this repo whose `agents/implement.md` (and code) is benchmarked. The default is `main`.
 - `bench_id`: the results directory. The default is the workflow run id.
 
-For each task and config, `bench-run` (model credentials only) copies one fixed commit of the target repo's default branch, runs the implement agent on the task's issue text with that harness and model, and grades the tree with the task's check. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` and the scrubbed transcript next to it.
+For each task and config, `bench-run` (model credentials only) copies one fixed commit of the target repo's default branch, runs the implement agent on the task's issue text with that harness and model, and grades the tree with the task's check. Nothing is posted on GitHub. `bench-save` (FACTORY_GH_TOKEN) pushes `bench/<bench-id>/<task>__<harness>__<model>.json` with the scrubbed transcript (`.jsonl`) and the agent's diff against the base commit (`.patch`) next to it. The diff is taken before the check is copied in, so it never holds the hidden check. A diff or transcript that gitleaks flags is withheld.
+
+Correctness alone rarely separates two prompts once every config passes, so run the score workflow after a bench: the judges then grade each cell, and the report compares the judges' pass rates between benches.
 
 ## Improve the factory
 
 `examples/improve.yml` in a target repo calls `.github/workflows/improve.yml` on demand. The improve agent (`agents/improve.md`) reads what the scorers, reviews, and benchmarks found, picks the one or two most frequent or costly failure patterns, and edits the agent prompts in `agents/` (never its own prompt or the judges) in a checkout of this repo to fix them. Its optional `harness` input picks claude-code or pi.
 
-- `improve-prepare` (FACTORY_GH_TOKEN) builds `findings.md` from `factory-runs`: run counts by status, each scorer's pass/fail/unknown per implement harness, every failing score with its run and the judge's reason, the changes the review approved that then failed correctness (with the review's text), how revise rounds turned out, and each benchmark's pass rate per config. Check output is reduced to how many of the hidden check's tests failed and which of the repo's own test files failed, so the agent never sees what the hidden checks test. It skips the run when nothing has failed yet. `node src/cli.ts findings ../factory-runs` prints the same file locally.
+- `improve-prepare` (FACTORY_GH_TOKEN) builds `findings.md` from `factory-runs`: run counts by status, each scorer's pass/fail/unknown per implement harness, every failing score with its run or bench cell and the judge's reason, the changes the review approved that then failed correctness (with the review's text), how revise rounds turned out, and each benchmark's pass rate per config. Check output is reduced to how many of the hidden check's tests failed and which of the repo's own test files failed, so the agent never sees what the hidden checks test. It skips the run when nothing has failed yet. `node src/cli.ts findings ../factory-runs` prints the same file locally.
 - `improve-run` (model credentials only) runs the agent with the checkout at `/work` and `findings.md` at `/input`.
 - `improve-save` (FACTORY_GH_TOKEN) diffs the agent's tree against an untouched copy and pushes `improvements/<id>/` to `factory-runs`: `improvement.json`, `findings.md`, and, unless the proposal is blocked, `patch.diff`, `summary.md`, and the scrubbed transcript `improve.jsonl`. A change to anything but `agents/*.md`, or to `agents/improve.md`, is `blocked_scope`, and gitleaks or a known secret in the patch or summary is `blocked_secret`.
 
@@ -93,7 +97,7 @@ open ../factory-runs/report.html
 
 `report.html` is one self-contained page that makes no network requests. It shows totals for runs, PRs, cost, merges, and reverts, then a table of runs you can filter by kind, harness, and status. Click a run to see its scores with their reasons, its stages and their review verdicts, and click a stage to read its transcript as messages, tool calls, and tool results.
 
-Below the runs, the page shows each scorer's pass rate per implement harness and a review calibration table: the final review verdict against correctness, where approve and wrong is a defect the review missed. Each benchmark gets a table of pass rate, average cost, and average wall time per config, and a chart of pass rate against cost that marks the configs no other config beats on both.
+Below the runs, the page shows each scorer's pass rate per implement harness and a review calibration table: the final review verdict against correctness, where approve and wrong is a defect the review missed. Each benchmark gets a table of correctness and each judge's pass rate, average cost, and average wall time per config, and a chart of pass rate against cost that marks the configs no other config beats on both. Two benches on different factory refs that ran the same task under the same config get a comparison: per config and scorer, the pass rate of each over the tasks both ran, and the difference. When one of them ran on `main`, it is A.
 
 The report asks GitHub for each PR's state through your `gh` login. A PR counts as reverted when a merged PR in the same repo says `Reverts <repo>#<number>`, which is what GitHub's Revert button writes. Human touches are the comments, reviews, and commits on the PR by the repo owner. Bots and the factory's own commits do not count. If `gh` cannot look up a PR, the report prints a warning and leaves that run's outcome blank.
 
@@ -105,7 +109,8 @@ For your own queries, build a SQLite database from the run files:
 node src/cli.ts db ../factory-runs
 sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) from runs group by harness'
 sqlite3 ../factory-runs/runs.sqlite 'select agent, verdict, count(*) from stages where agent = "review" group by verdict'
-sqlite3 ../factory-runs/runs.sqlite 'select scorer, avg(pass), count(*) from scores group by scorer'
+sqlite3 ../factory-runs/runs.sqlite 'select scorer, avg(pass), count(*) from scores where run_id is not null group by scorer'
+sqlite3 ../factory-runs/runs.sqlite 'select bench_id, scorer, avg(pass), count(*) from scores where bench_id is not null group by 1, 2'
 sqlite3 ../factory-runs/runs.sqlite 'select bench_id, harness, requested_model, avg(pass), avg(cost_usd) from bench group by 1, 2, 3'
 sqlite3 ../factory-runs/runs.sqlite 'select id, status, changed_files, cost_usd from improvements'
 ```

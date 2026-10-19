@@ -130,15 +130,18 @@ export type ReportRow = RunRecord & {
   humanTouches: number | null
 }
 
-// A grade of one implement run's final pushed tree. One file per (run, scorer): scores/<runId>/<scorer>.json.
+// What a score grades: an implement run's final pushed tree, or one bench cell's change.
+export type ScoreSubject = { kind: 'run'; runId: string } | { kind: 'bench'; benchId: string; cell: string }
+
+// One file per (subject, scorer): scores/<runId>/<scorer>.json, or scores/bench/<benchId>/<cell>/<scorer>.json.
 export type Score = {
-  runId: string
+  subject: ScoreSubject
   // `correctness`, or the name of a judge file in scorers/.
   scorer: string
   // null when the run could not be scored; reason says why.
   pass: boolean | null
   reason: string
-  // The commit that was graded: the last commit the factory pushed to the PR.
+  // A run's graded commit: the last commit the factory pushed to the PR. A bench cell's base commit, which its stored diff applies to.
   sha: string
   factorySha: string
   at: string
@@ -150,7 +153,7 @@ export type Score = {
 export type BenchConfig = { harness: HarnessName; model: string }
 
 // One cell of a benchmark: one task under one config.
-// Stored at bench/<benchId>/<task>__<harness>__<requested model, / as _>.json.
+// Stored at bench/<benchId>/<task>__<harness>__<requested model, / as _>.json, next to its .jsonl transcript and .patch diff.
 export type BenchResult = {
   benchId: string
   task: string
@@ -172,6 +175,9 @@ export type BenchResult = {
   wallTimeS: number
   at: string
   transcript: 'stored' | 'withheld'
+  // The agent's change against baseSha, without the hidden check. withheld when it was not stored: gitleaks flagged it,
+  // or the cell predates stored diffs.
+  diff: 'stored' | 'withheld'
 }
 
 export type ImprovementStatus = 'proposed' | 'no_change' | 'agent_failed' | 'blocked_secret' | 'blocked_scope'
