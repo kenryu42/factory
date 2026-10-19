@@ -53,5 +53,5 @@ test('other labels do not start a run', () => {
 
 test('an unknown or ambiguous harness label does not start a run', () => {
   assert.equal(decide(labeled({ labels: ['harness:gemini', 'factory'] })).run, false)
-  assert.equal(decide(labeled({ labels: ['harness:pi', 'harness:codex', 'factory'] })).run, false)
+  assert.equal(decide(labeled({ labels: ['harness:pi', 'harness:claude-code', 'factory'] })).run, false)
 })

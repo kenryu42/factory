@@ -53,8 +53,8 @@ const pr = (n: number) => ({ status: 'pr_opened' as const, prUrl: `https://githu
 test('summary totals cost over priced runs and divides it by opened PRs', () => {
   const s = summarize([
     row({ id: 'a', ...pr(1), costUsd: 0.5, outcome: 'merged', humanTouches: 2 }),
-    row({ id: 'b', ...pr(2), harness: 'pi', costUsd: 0.25, outcome: 'reverted', humanTouches: 0 }),
-    row({ id: 'c', ...pr(3), harness: 'codex', costUsd: null, outcome: null, humanTouches: null }),
+    row({ id: 'b', ...pr(2), costUsd: 0.25, outcome: 'reverted', humanTouches: 0 }),
+    row({ id: 'c', ...pr(3), harness: 'pi', costUsd: null, outcome: null, humanTouches: null }),
     row({ id: 'd', status: 'agent_failed', costUsd: 0.75 }),
   ])
   assert.equal(s.runs, 4)
@@ -66,9 +66,8 @@ test('summary totals cost over priced runs and divides it by opened PRs', () => 
   assert.equal(s.avgHumanTouches, 1)
   assert.deepEqual(s.byStatus, { pr_opened: 3, agent_failed: 1 })
   assert.deepEqual(s.byHarness, {
-    'claude-code': { runs: 2, costUsd: 1.25 },
-    codex: { runs: 1, costUsd: null },
-    pi: { runs: 1, costUsd: 0.25 },
+    'claude-code': { runs: 3, costUsd: 1.5 },
+    pi: { runs: 1, costUsd: null },
   })
 })
 

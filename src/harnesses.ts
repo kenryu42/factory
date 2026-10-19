@@ -73,49 +73,6 @@ export const harnesses: Record<HarnessName, Harness> = {
     },
   },
 
-  codex: {
-    keyEnv: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
-    command: (model, prompt) => [
-      'codex', 'exec', '--json',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--skip-git-repo-check',
-      '-m', model,
-      prompt,
-    ],
-    parse(jsonl) {
-      const all = events(jsonl)
-      const turns = all.filter((e) => e.type === 'turn.completed')
-      if (turns.length === 0) return failed
-      const sum = (key: string) => turns.reduce((n, t) => n + (t.usage?.[key] ?? 0), 0)
-      const lastMessage = all.findLast((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
-      return {
-        ok: !all.some((e) => e.type === 'turn.failed' || e.type === 'error'),
-        finalText: lastMessage?.item.text ?? '',
-        usage: {
-          inputTokens: sum('input_tokens') - sum('cached_input_tokens'),
-          cacheReadTokens: sum('cached_input_tokens'),
-          outputTokens: sum('output_tokens'),
-          costUsd: null,
-        },
-      }
-    },
-    steps(jsonl) {
-      return events(jsonl)
-        .filter((e) => e.type === 'item.completed')
-        .flatMap(({ item }): Step[] => {
-          if (item.type === 'agent_message') return [{ kind: 'message', text: item.text }]
-          if (item.type === 'command_execution') return [
-            { kind: 'tool_call', tool: 'shell', input: item.command },
-            { kind: 'tool_result', output: item.aggregated_output ?? '', isError: item.exit_code !== 0 },
-          ]
-          if (item.type === 'file_change') {
-            return [{ kind: 'tool_call', tool: 'file_change', input: item.changes.map((c: Event) => `${c.kind} ${c.path}`).join('\n') }]
-          }
-          return []
-        })
-    },
-  },
-
   pi: {
     keyEnv: ['DEEPSEEK_API_KEY'],
     command: (model, prompt) => ['pi', '-p', '--mode', 'json', '--no-session', '--model', model, '--', prompt],

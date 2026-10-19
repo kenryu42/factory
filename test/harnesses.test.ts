@@ -14,13 +14,6 @@ test('claude-code: reads cost, tokens and the final summary', () => {
   assert.match(t.finalText, /a \+ b/)
 })
 
-test('codex: reads tokens, reports no cost, and keeps the last message', () => {
-  const t = harnesses.codex.parse(fixture('codex'))
-  assert.equal(t.ok, true)
-  assert.deepEqual(t.usage, { inputTokens: 22180, cacheReadTokens: 63744, outputTokens: 313, costUsd: null })
-  assert.match(t.finalText, /^Fixed `add\(\)`/)
-})
-
 test('pi: sums cost and tokens over every assistant turn', () => {
   const t = harnesses.pi.parse(fixture('pi'))
   assert.equal(t.ok, true)
@@ -57,15 +50,6 @@ test('claude-code steps: the Edit call on math.js, its result, and the final mes
   const last = steps.at(-1)!
   assert.ok(last.kind === 'message' && /a \+ b/.test(last.text))
   assert.equal(steps.filter((s) => s.kind === 'tool_call').length, 3)
-})
-
-test('codex steps: shell commands with their output and the file_change on math.js', () => {
-  const steps = harnesses.codex.steps(fixture('codex'))
-  assert.ok(steps.some((s) => s.kind === 'tool_call' && s.tool === 'shell' && s.input.includes('cat math.js')))
-  assert.ok(steps.some((s) => s.kind === 'tool_result' && s.output.includes('return a - b;') && !s.isError))
-  assert.ok(steps.some((s) => s.kind === 'tool_call' && s.tool === 'file_change' && s.input === 'update /work/math.js'))
-  const last = steps.at(-1)!
-  assert.ok(last.kind === 'message' && /^Fixed `add\(\)`/.test(last.text))
 })
 
 test('pi steps: the edit call, the failed git diff, and the final text', () => {

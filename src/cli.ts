@@ -17,7 +17,7 @@ import { prOutcome, renderReport, type PrView } from './report.ts'
 import { scrub } from './scrub.ts'
 import type { AgentResult, Plan, PublishResult, ReportRow, RunRecord, Step } from './types.ts'
 
-const SECRET_ENV = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'DEEPSEEK_API_KEY', 'FACTORY_GH_TOKEN']
+const SECRET_ENV = ['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'FACTORY_GH_TOKEN']
 const AGENT_TIMEOUT_MS = 50 * 60 * 1000
 
 const factoryDir = resolve(dirname(new URL(import.meta.url).pathname), '..')

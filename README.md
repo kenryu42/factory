@@ -1,6 +1,6 @@
 # factory
 
-A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code, Codex, or Pi) works on it in a container and opens a pull request. Every run leaves a record with its cost, tokens, and scrubbed transcript in a private repo.
+A one-person software factory that runs on GitHub Actions. You label a GitHub issue `factory`. A coding agent (Claude Code or Pi) works on it in a container and opens a pull request. Every run leaves a record with its cost, tokens, and scrubbed transcript in a private repo.
 
 ## How a run works
 
@@ -11,7 +11,7 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 3. `publish` copies the agent's files into a fresh clone, checks the diff and summary with gitleaks, and opens a pull request. It refuses changes under `.github/`.
 4. `record` scrubs the transcript, checks it with gitleaks, and pushes `runs/<id>.json` and `transcripts/<id>.jsonl` to `<owner>/factory-runs`. A transcript that still looks like it holds a secret is withheld.
 
-`agents/implement.md` defines the agent: its prompt, the default harness, and the model for each harness. To pick a harness for one issue, add a `harness:claude-code`, `harness:codex`, or `harness:pi` label before you add `factory`.
+`agents/implement.md` defines the agent: its prompt, the default harness, and the model for each harness. To pick a harness for one issue, add a `harness:claude-code` or `harness:pi` label before you add `factory`.
 
 ## Set up a target repo
 
@@ -22,13 +22,12 @@ A one-person software factory that runs on GitHub Actions. You label a GitHub is
 	gh secret set FACTORY_GH_TOKEN -R <owner>/<repo>
 	gh secret set ANTHROPIC_API_KEY -R <owner>/<repo>   # claude-code
 	gh secret set DEEPSEEK_API_KEY -R <owner>/<repo>    # pi
-	gh secret set OPENAI_API_KEY -R <owner>/<repo>      # codex
 	```
 
 	Use keys made only for the factory, each with a hard spend limit. Never use a subscription login.
 3. Copy `examples/factory.yml` to `.github/workflows/factory.yml` in the target repo.
 4. In the target repo settings under **Actions**, set workflow permissions to read-only and require approval for workflows from all outside contributors.
-5. Create the labels `factory`, `harness:claude-code`, `harness:codex`, and `harness:pi`.
+5. Create the labels `factory`, `harness:claude-code`, and `harness:pi`.
 
 ## Query your runs
 
@@ -50,8 +49,6 @@ For your own queries, build a SQLite database from the run files:
 node src/cli.ts db ../factory-runs
 sqlite3 ../factory-runs/runs.sqlite 'select harness, count(*), sum(cost_usd) from runs group by harness'
 ```
-
-Codex runs record tokens but no cost, because Codex reports no price.
 
 Both commands write generated files into the `factory-runs` checkout. Do not commit `report.html` or `runs.sqlite`; add them to that repo's `.gitignore`.
 

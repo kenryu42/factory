@@ -4,7 +4,7 @@ import { HARNESS_NAMES, isHarnessName, type Agent } from './types.ts'
 
 // Agent files are markdown with flat `key: value` frontmatter:
 //   harness: <default harness>
-//   claude-code: <model>   codex: <model>   pi: <model>
+//   claude-code: <model>   pi: <model>
 export function parseAgent(name: string, text: string): Agent {
   const match = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
   if (!match) throw new Error(`agents/${name}.md: missing --- frontmatter ---`)

@@ -6,7 +6,6 @@ on:
   workflow_call:
     secrets:
       ANTHROPIC_API_KEY: { required: false }
-      OPENAI_API_KEY: { required: false }
       DEEPSEEK_API_KEY: { required: false }
       FACTORY_GH_TOKEN: { required: true }
 
@@ -60,7 +59,6 @@ jobs:
         run: node factory/src/cli.ts agent
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
       - if: always() && steps.guard.outputs.run == 'true'
@@ -69,7 +67,6 @@ jobs:
         env:
           FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
       - if: always() && steps.guard.outputs.run == 'true'
@@ -78,5 +75,4 @@ jobs:
         env:
           FACTORY_GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

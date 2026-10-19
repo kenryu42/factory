@@ -1,4 +1,4 @@
-export const HARNESS_NAMES = ['claude-code', 'codex', 'pi'] as const
+export const HARNESS_NAMES = ['claude-code', 'pi'] as const
 export type HarnessName = (typeof HARNESS_NAMES)[number]
 
 export function isHarnessName(value: string): value is HarnessName {
@@ -32,7 +32,7 @@ export type Usage = {
   inputTokens: number
   cacheReadTokens: number
   outputTokens: number
-  // null when the harness reports tokens but no price (Codex).
+  // null when the run reported no price, such as a run that ended before its final event.
   costUsd: number | null
 }
 
